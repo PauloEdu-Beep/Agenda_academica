@@ -1,0 +1,39 @@
+{% extends 'layout.html' %}
+
+{% block content %}
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2>Disciplinas</h2>
+        <a href="{{ url_for('add_disciplina') }}" class="btn btn-primary">Adicionar Disciplina</a>
+    </div>
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Nome da Disciplina</th>
+                <th>Código</th>
+                <th>Carga Horária</th>
+                <th>Ações</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for disciplina in disciplinas %}
+            <tr>
+                <td>{{ disciplina.disciplina_id }}</td>
+                <td>{{ disciplina.nome_disciplina }}</td>
+                <td>{{ disciplina.codigo_disciplina }}</td>
+                <td>{{ disciplina.carga_horaria or 'N/A' }}</td>
+                <td>
+                    <a href="{{ url_for('edit_disciplina', id=disciplina.disciplina_id) }}" class="btn btn-sm btn-warning">Editar</a>
+                    <form action="{{ url_for('delete_disciplina', id=disciplina.disciplina_id) }}" method="post" style="display:inline;">
+                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Tem certeza? Isso excluirá todos os vínculos e compromissos associados a esta disciplina.');">Excluir</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" class="text-center">Nenhuma disciplina cadastrada.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% endblock %}

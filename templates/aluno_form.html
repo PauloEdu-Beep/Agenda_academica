@@ -1,0 +1,22 @@
+{% extends 'layout.html' %}
+
+{% block content %}
+    <h2>{% if action == 'add' %}Adicionar Novo Aluno{% else %}Editar Aluno{% endif %}</h2>
+    <form method="post">
+        <div class="mb-3">
+            <label for="nome_completo" class="form-label">Nome Completo</label>
+            <input type="text" class="form-control" id="nome_completo" name="nome_completo" value="{{ aluno.nome_completo if aluno else '' }}" required>
+        </div>
+        <div class="mb-3">
+            <label for="email" class="form-label">Email</label>
+            <input type="email" class="form-control" id="email" name="email" value="{{ aluno.email if aluno else '' }}" required>
+        </div>
+        <div class="mb-3">
+            <label for="matricula" class="form-label">Matrícula</label>
+            <input type="text" class="form-control" id="matricula" name="matricula" value="{{ aluno.matricula if aluno else '' }}" required>
+        </div>
+        <!-- Em uma aplicação real, você teria um campo de senha aqui -->
+        <button type="submit" class="btn btn-primary">Salvar</button>
+        <a href="{{ url_for('list_alunos') }}" class="btn btn-secondary">Cancelar</a>
+    </form>
+{% endblock %}

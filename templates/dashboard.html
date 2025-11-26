@@ -1,0 +1,63 @@
+{% extends 'layout.html' %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="p-5 mb-4 bg-light rounded-3 shadow-sm">
+        <div class="container-fluid py-2">
+            <h1 class="display-5 fw-bold">Bem-vindo, {{ session['nome'] }}!</h1>
+            <p class="fs-4">Painel do {{ session['tipo'].capitalize() }}</p>
+            
+            <hr class="my-4">
+
+            <div class="d-grid gap-3 d-sm-flex">
+                <!-- Botão Comum: Minha Agenda -->
+                <a href="{{ url_for('list_compromissos') }}" class="btn btn-primary btn-lg px-4 gap-3">
+                    📅 Minha Agenda
+                </a>
+
+                <!-- Opções para ALUNOS -->
+                {% if session['tipo'] == 'ALUNO' %}
+                    <a href="{{ url_for('gerenciar_matriculas') }}" class="btn btn-success btn-lg px-4">
+                        🎓 Realizar Matrícula
+                    </a>
+                {% endif %}
+
+                <!-- Opções para PROFESSORES -->
+                {% if session['tipo'] == 'PROFESSOR' %}
+                    <a href="{{ url_for('add_compromisso') }}" class="btn btn-warning btn-lg px-4">
+                        ✍️ Agendar Prova/Trabalho
+                    </a>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Opções exclusivas para ADMIN -->
+    {% if session['tipo'] == 'ADMIN' %}
+    <div class="row align-items-md-stretch mt-4 g-3">
+        <div class="col-md-4">
+            <div class="h-100 p-4 text-white bg-dark rounded-3">
+                <h2>👤 Usuários</h2>
+                <p>Gerencie alunos e professores cadastrados.</p>
+                <a href="{{ url_for('list_alunos') }}" class="btn btn-outline-light w-100 mb-2">Gerenciar Alunos</a>
+                <a href="{{ url_for('list_professores') }}" class="btn btn-outline-light w-100">Gerenciar Professores</a>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="h-100 p-4 bg-secondary text-white border rounded-3">
+                <h2>📚 Disciplinas</h2>
+                <p>Cadastre novas disciplinas e veja a grade.</p>
+                <a href="{{ url_for('list_disciplinas') }}" class="btn btn-outline-light w-100 mt-auto">Gerenciar Disciplinas</a>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="h-100 p-4 bg-warning bg-opacity-75 border rounded-3">
+                <h2>⚙️ Config. Turmas</h2>
+                <p>Vincule Professores às Disciplinas (Alocação).</p>
+                <a href="{{ url_for('alocacao_professor') }}" class="btn btn-dark w-100 mt-auto">Gerenciar Alocações</a>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,21 @@
+{% extends 'layout.html' %}
+
+{% block content %}
+    <h2>{% if action == 'add' %}Adicionar Nova Disciplina{% else %}Editar Disciplina{% endif %}</h2>
+    <form method="post">
+        <div class="mb-3">
+            <label for="nome_disciplina" class="form-label">Nome da Disciplina</label>
+            <input type="text" class="form-control" id="nome_disciplina" name="nome_disciplina" value="{{ disciplina.nome_disciplina if disciplina else '' }}" required>
+        </div>
+        <div class="mb-3">
+            <label for="codigo_disciplina" class="form-label">Código da Disciplina</label>
+            <input type="text" class="form-control" id="codigo_disciplina" name="codigo_disciplina" value="{{ disciplina.codigo_disciplina if disciplina else '' }}" required>
+        </div>
+        <div class="mb-3">
+            <label for="carga_horaria" class="form-label">Carga Horária (horas)</label>
+            <input type="number" class="form-control" id="carga_horaria" name="carga_horaria" value="{{ disciplina.carga_horaria if disciplina else '' }}">
+        </div>
+        <button type="submit" class="btn btn-primary">Salvar</button>
+        <a href="{{ url_for('list_disciplinas') }}" class="btn btn-secondary">Cancelar</a>
+    </form>
+{% endblock %}

@@ -1,0 +1,21 @@
+{% extends 'layout.html' %}
+
+{% block content %}
+    <h2>{% if action == 'add' %}Adicionar Novo Professor{% else %}Editar Professor{% endif %}</h2>
+    <form method="post">
+        <div class="mb-3">
+            <label for="nome_completo" class="form-label">Nome Completo</label>
+            <input type="text" class="form-control" id="nome_completo" name="nome_completo" value="{{ professor.nome_completo if professor else '' }}" required>
+        </div>
+        <div class="mb-3">
+            <label for="email" class="form-label">Email</label>
+            <input type="email" class="form-control" id="email" name="email" value="{{ professor.email if professor else '' }}" required>
+        </div>
+        <div class="mb-3">
+            <label for="departamento" class="form-label">Departamento</label>
+            <input type="text" class="form-control" id="departamento" name="departamento" value="{{ professor.departamento if professor else '' }}">
+        </div>
+        <button type="submit" class="btn btn-primary">Salvar</button>
+        <a href="{{ url_for('list_professores') }}" class="btn btn-secondary">Cancelar</a>
+    </form>
+{% endblock %}

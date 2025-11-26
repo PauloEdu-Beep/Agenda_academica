@@ -1,0 +1,39 @@
+{% extends 'layout.html' %}
+
+{% block content %}
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2>Professores</h2>
+        <a href="{{ url_for('add_professor') }}" class="btn btn-primary">Adicionar Professor</a>
+    </div>
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Nome Completo</th>
+                <th>Email</th>
+                <th>Departamento</th>
+                <th>Ações</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for professor in professores %}
+            <tr>
+                <td>{{ professor.usuario_id }}</td>
+                <td>{{ professor.nome_completo }}</td>
+                <td>{{ professor.email }}</td>
+                <td>{{ professor.departamento }}</td>
+                <td>
+                    <a href="{{ url_for('edit_professor', id=professor.usuario_id) }}" class="btn btn-sm btn-warning">Editar</a>
+                    <form action="{{ url_for('delete_professor', id=professor.usuario_id) }}" method="post" style="display:inline;">
+                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Tem certeza? Excluir um professor pode afetar as turmas e compromissos associados.');">Excluir</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" class="text-center">Nenhum professor cadastrado.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% endblock %}

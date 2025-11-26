@@ -1,0 +1,67 @@
+{% extends 'layout.html' %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2>Alocação de Professores</h2>
+        <a href="{{ url_for('dashboard') }}" class="btn btn-secondary btn-sm">Voltar</a>
+    </div>
+    
+    <p class="text-muted">Defina qual professor leciona qual disciplina. Isso permitirá que o professor agende avaliações para os alunos matriculados.</p>
+
+    <div class="card mb-4 border-primary">
+        <div class="card-header bg-primary text-white">Nova Alocação</div>
+        <div class="card-body">
+            <form method="post" class="row g-3 align-items-end">
+                <div class="col-md-5">
+                    <label class="form-label">Professor</label>
+                    <select name="professor_id" class="form-select" required>
+                        <option value="">Escolha...</option>
+                        {% for p in professores %}
+                        <option value="{{ p.usuario_id }}">{{ p.nome_completo }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-5">
+                    <label class="form-label">Disciplina</label>
+                    <select name="disciplina_id" class="form-select" required>
+                        <option value="">Escolha...</option>
+                        {% for d in disciplinas %}
+                        <option value="{{ d.disciplina_id }}">{{ d.nome_disciplina }} ({{ d.codigo_disciplina }})</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <button type="submit" class="btn btn-success w-100">Vincular</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <h4>Alocações Atuais</h4>
+    <div class="table-responsive">
+        <table class="table table-hover table-striped">
+            <thead class="table-light">
+                <tr>
+                    <th>Disciplina</th>
+                    <th>Professor Responsável</th>
+                    <th>Semestre</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for a in alocacoes %}
+                <tr>
+                    <td>{{ a.nome_disciplina }}</td>
+                    <td>{{ a.nome_completo }}</td>
+                    <td>{{ a.semestre }}</td>
+                    <td><span class="badge bg-success">Ativo</span></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" class="text-center text-muted">Nenhuma turma formada ainda.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

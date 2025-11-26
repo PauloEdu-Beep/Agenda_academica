@@ -1,0 +1,75 @@
+{% extends 'layout.html' %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="card shadow">
+        <div class="card-header bg-primary text-white">
+            <h4 class="mb-0">Agendar Compromisso</h4>
+        </div>
+        <div class="card-body">
+            <form method="post" id="formCompromisso">
+                
+                <!-- 1. Título e Data (Comum a todos) -->
+                <div class="row mb-3">
+                    <div class="col-md-8">
+                        <label class="form-label">Título</label>
+                        <input type="text" name="titulo" class="form-control" required placeholder="Ex: Prova 1, Entrega de Lista...">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Data e Hora Início</label>
+                        <input type="datetime-local" name="data_hora_inicio" class="form-control" required>
+                    </div>
+                </div>
+
+                <!-- 2. Tipo de Compromisso (Dropdown Condicional) -->
+                <div class="mb-3">
+                    <label class="form-label">Tipo de Evento</label>
+                    <select class="form-select" name="tipo_compromisso" id="selectTipo" required>
+                        {% if session['tipo'] == 'PROFESSOR' %}
+                            <option value="PROVA">📚 Prova (Avaliação)</option>
+                            <option value="TAREFA">📝 Trabalho / Entrega</option>
+                            <option value="REUNIAO">📢 Aviso Importante</option>
+                        {% else %}
+                            <option value="TAREFA">📌 Estudo Pessoal</option>
+                            <option value="OUTRO">🎈 Lembrete Pessoal</option>
+                        {% endif %}
+                    </select>
+                </div>
+
+                <!-- 3. Seleção de Turma (Apenas para Professores) -->
+                {% if session['tipo'] == 'PROFESSOR' %}
+                <div class="mb-3 p-3 bg-light border rounded" id="divTurma">
+                    <label class="form-label fw-bold text-primary">Vincular à Disciplina:</label>
+                    <p class="small text-muted mb-1">Este evento aparecerá para todos os alunos matriculados nesta matéria.</p>
+                    
+                    {% if turmas %}
+                        <select class="form-select" name="turma_id" required>
+                            <option value="" disabled selected>Selecione a matéria...</option>
+                            {% for t in turmas %}
+                                <option value="{{ t.usuario_id }}-{{ t.disciplina_id }}">{{ t.nome_disciplina }}</option>
+                            {% endfor %}
+                        </select>
+                    {% else %}
+                        <div class="alert alert-warning">
+                            <i class="bi bi-exclamation-triangle"></i>
+                            Você não está vinculado a nenhuma disciplina. 
+                            <br>Entre em contato com a administração para realizar sua alocação.
+                        </div>
+                    {% endif %}
+                </div>
+                {% endif %}
+
+                <div class="mb-3">
+                    <label class="form-label">Detalhes Adicionais</label>
+                    <textarea name="descricao" class="form-control" rows="3"></textarea>
+                </div>
+
+                <div class="d-flex justify-content-end gap-2">
+                    <a href="{{ url_for('list_compromissos') }}" class="btn btn-secondary">Cancelar</a>
+                    <button type="submit" class="btn btn-success">Salvar Agenda</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

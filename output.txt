@@ -1,0 +1,654 @@
+﻿# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\app.py
+
+# app.py
+from flask import Flask, render_template, request, redirect, url_for, flash, session
+import pymysql.cursors
+from functools import wraps
+from db_config import db_config
+
+app = Flask(__name__)
+app.secret_key = 'chave_secreta_segura' # Em prod, use variÃ¡vel de ambiente
+
+# --- ConexÃ£o DB ---
+def get_db_connection():
+    try:
+        conn = pymysql.connect(host=db_config['host'],
+                             user=db_config['user'],
+                             password=db_config['password'],
+                             database=db_config['database'],
+                             cursorclass=pymysql.cursors.DictCursor)
+        return conn
+    except pymysql.MySQLError as err:
+        print(f"Erro DB: {err}")
+        return None
+
+# --- Decorator de Login ---
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'usuario_id' not in session:
+            flash("Por favor, faÃ§a login para acessar.", "warning")
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# --- Rotas de AutenticaÃ§Ã£o ---
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form['email']
+        senha = request.form['senha']
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        # Nota: Em produÃ§Ã£o, use hash real (bcrypt/argon2). Aqui compara string simples conforme PDF.
+        cursor.execute("SELECT * FROM Usuario WHERE email = %s AND senha_hash = %s", (email, senha))
+        user = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if user:
+            session['usuario_id'] = user['usuario_id']
+            session['nome'] = user['nome_completo']
+            session['tipo'] = user['tipo_usuario']
+            return redirect(url_for('dashboard'))
+        else:
+            flash('Email ou senha invÃ¡lidos', 'danger')
+            
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+# --- Dashboard (A "Cara" da Agenda) ---
+@app.route('/')
+@login_required
+def dashboard():
+    return render_template('dashboard.html')
+
+# --- MatrÃ­culas (Novo: Resolve a crÃ­tica de vÃ­nculo Aluno-Disciplina) ---
+@app.route('/matriculas', methods=['GET', 'POST'])
+@login_required
+def gerenciar_matriculas():
+    # Apenas Alunos se matriculam ou Admins matriculam alunos. 
+    # SimplificaÃ§Ã£o: O prÃ³prio aluno se matricula.
+    if session['tipo'] != 'ALUNO':
+         flash("Apenas alunos podem realizar matrÃ­culas nesta versÃ£o.", "info")
+         return redirect(url_for('dashboard'))
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    if request.method == 'POST':
+        disciplina_id = request.form['disciplina_id']
+        semestre = "2024.1" # Hardcoded para exemplo
+        
+        try:
+            cursor.execute("INSERT INTO Matricula (usuario_id, disciplina_id, semestre) VALUES (%s, %s, %s)",
+                           (session['usuario_id'], disciplina_id, semestre))
+            conn.commit()
+            flash('MatrÃ­cula realizada com sucesso!', 'success')
+        except pymysql.MySQLError as e:
+            conn.rollback()
+            flash(f'Erro na matrÃ­cula (jÃ¡ matriculado?): {e}', 'danger')
+
+    # Listar disciplinas disponÃ­veis vs disciplinas jÃ¡ matriculadas
+    cursor.execute("""
+        SELECT d.*, 
+            (SELECT COUNT(*) FROM Matricula m WHERE m.disciplina_id = d.disciplina_id AND m.usuario_id = %s) as matriculado
+        FROM Disciplina d
+    """, (session['usuario_id'],))
+    disciplinas = cursor.fetchall()
+    
+    cursor.close()
+    conn.close()
+    return render_template('matriculas.html', disciplinas=disciplinas)
+
+# --- Compromissos (LÃ³gica alterada para visÃ£o do UsuÃ¡rio) ---
+@app.route('/compromissos')
+@login_required
+def list_compromissos():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    user_id = session['usuario_id']
+    tipo = session['tipo']
+
+    # LÃ³gica CrÃ­tica: O que cada um vÃª?
+    query = ""
+    params = ()
+
+    if tipo == 'ALUNO':
+        # Aluno vÃª: Seus compromissos pessoais OU Compromissos das turmas (Prof_Disc) onde ele tem MatrÃ­cula
+        query = """
+            SELECT c.*, d.nome_disciplina, u_prof.nome_completo as professor_nome
+            FROM Compromisso c
+            LEFT JOIN Disciplina d ON c.turma_disciplina_id = d.disciplina_id
+            LEFT JOIN Usuario u_prof ON c.turma_usuario_id = u_prof.usuario_id
+            LEFT JOIN Matricula m ON m.disciplina_id = c.turma_disciplina_id AND m.usuario_id = %s
+            WHERE c.aluno_usuario_id = %s 
+               OR (c.turma_usuario_id IS NOT NULL AND m.usuario_id IS NOT NULL)
+            ORDER BY c.data_hora_inicio ASC
+        """
+        params = (user_id, user_id)
+        
+    elif tipo == 'PROFESSOR':
+        # Professor vÃª: Compromissos que ELE criou para suas turmas
+        query = """
+            SELECT c.*, d.nome_disciplina
+            FROM Compromisso c
+            LEFT JOIN Disciplina d ON c.turma_disciplina_id = d.disciplina_id
+            WHERE c.turma_usuario_id = %s
+            ORDER BY c.data_hora_inicio ASC
+        """
+        params = (user_id,)
+        
+    else: # ADMIN
+        query = "SELECT * FROM Compromisso ORDER BY data_hora_inicio DESC"
+        params = ()
+
+    cursor.execute(query, params)
+    compromissos = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return render_template('compromissos.html', compromissos=compromissos)
+
+@app.route('/compromissos/add', methods=['GET', 'POST'])
+@login_required
+def add_compromisso():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    if request.method == 'POST':
+        titulo = request.form['titulo']
+        descricao = request.form['descricao']
+        inicio = request.form['data_hora_inicio']
+        fim = request.form.get('data_hora_fim') or None # Novo campo PDF
+        tipo_comp = request.form['tipo_compromisso']
+        
+        # DefiniÃ§Ã£o de escopo baseada em quem estÃ¡ logado
+        aluno_id = None
+        turma_prof_id = None
+        turma_disc_id = None
+
+        if session['tipo'] == 'ALUNO':
+            aluno_id = session['usuario_id'] # Compromisso Pessoal
+        elif session['tipo'] == 'PROFESSOR':
+            # Professor seleciona para qual turma Ã© o compromisso
+            turma_selection = request.form.get('turma_id') # formato "prof_id-disc_id"
+            if turma_selection:
+                turma_prof_id, turma_disc_id = turma_selection.split('-')
+
+        try:
+            cursor.execute("""
+                INSERT INTO Compromisso 
+                (titulo, descricao, data_hora_inicio, data_hora_fim, tipo_compromisso, aluno_usuario_id, turma_usuario_id, turma_disciplina_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (titulo, descricao, inicio, fim, tipo_comp, aluno_id, turma_prof_id, turma_disc_id))
+            conn.commit()
+            flash('Compromisso agendado!', 'success')
+        except pymysql.MySQLError as err:
+            flash(f'Erro: {err}', 'danger')
+        
+        cursor.close()
+        conn.close()
+        return redirect(url_for('list_compromissos'))
+
+    # Preparar dados para o formulÃ¡rio
+    turmas_professor = []
+    if session['tipo'] == 'PROFESSOR':
+        # Buscar turmas que este professor leciona (Professor_Disciplina)
+        cursor.execute("""
+            SELECT pd.usuario_id, pd.disciplina_id, d.nome_disciplina
+            FROM Professor_Disciplina pd
+            JOIN Disciplina d ON pd.disciplina_id = d.disciplina_id
+            WHERE pd.usuario_id = %s
+        """, (session['usuario_id'],))
+        turmas_professor = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+    return render_template('compromisso_form.html', turmas=turmas_professor)
+
+# --- Rotas CRUD Admin (Alunos, Profs, Disciplinas) ---
+# (Manter as rotas anteriores de CRUD, mas adicionar @login_required 
+# e verificar se session['tipo'] == 'ADMIN' para seguranÃ§a extra)
+# ... [CÃ³digo CRUD anterior aqui] ...
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\db_config.py
+
+# db_config.py
+db_config = {
+    'host': 'localhost',
+    'user': 'root',      # Substitua pelo seu usuÃ¡rio do MySQL
+    'password': 'SPQR#Invictus476',    # Substitua pela sua senha
+    'database': 'agenda_academica' # Nome do banco de dados atualizado
+}
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\alunos.html
+
+{% extends 'layout.html' %}
+
+{% block content %}
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2>Alunos</h2>
+        <a href="{{ url_for('add_aluno') }}" class="btn btn-primary">Adicionar Aluno</a>
+    </div>
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Nome Completo</th>
+                <th>Email</th>
+                <th>MatrÃ­cula</th>
+                <th>AÃ§Ãµes</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for aluno in alunos %}
+            <tr>
+                <td>{{ aluno.usuario_id }}</td>
+                <td>{{ aluno.nome_completo }}</td>
+                <td>{{ aluno.email }}</td>
+                <td>{{ aluno.matricula }}</td>
+                <td>
+                    <a href="{{ url_for('edit_aluno', id=aluno.usuario_id) }}" class="btn btn-sm btn-warning">Editar</a>
+                    <form action="{{ url_for('delete_aluno', id=aluno.usuario_id) }}" method="post" style="display:inline;">
+                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Tem certeza?');">Excluir</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% endblock %}
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\aluno_form.html
+
+{% extends 'layout.html' %}
+
+{% block content %}
+    <h2>{% if action == 'add' %}Adicionar Novo Aluno{% else %}Editar Aluno{% endif %}</h2>
+    <form method="post">
+        <div class="mb-3">
+            <label for="nome_completo" class="form-label">Nome Completo</label>
+            <input type="text" class="form-control" id="nome_completo" name="nome_completo" value="{{ aluno.nome_completo if aluno else '' }}" required>
+        </div>
+        <div class="mb-3">
+            <label for="email" class="form-label">Email</label>
+            <input type="email" class="form-control" id="email" name="email" value="{{ aluno.email if aluno else '' }}" required>
+        </div>
+        <div class="mb-3">
+            <label for="matricula" class="form-label">MatrÃ­cula</label>
+            <input type="text" class="form-control" id="matricula" name="matricula" value="{{ aluno.matricula if aluno else '' }}" required>
+        </div>
+        <!-- Em uma aplicaÃ§Ã£o real, vocÃª teria um campo de senha aqui -->
+        <button type="submit" class="btn btn-primary">Salvar</button>
+        <a href="{{ url_for('list_alunos') }}" class="btn btn-secondary">Cancelar</a>
+    </form>
+{% endblock %}
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\compromissos.html
+
+{% extends 'layout.html' %}
+
+{% block content %}
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2>Compromissos</h2>
+        <a href="{{ url_for('add_compromisso') }}" class="btn btn-primary">Adicionar Compromisso</a>
+    </div>
+    <div class="list-group">
+        {% for c in compromissos %}
+        <div class="list-group-item list-group-item-action flex-column align-items-start">
+            <div class="d-flex w-100 justify-content-between">
+                <h5 class="mb-1">{{ c.titulo }} 
+                    <span class="badge 
+                        {% if c.tipo_compromisso == 'PROVA' %}bg-danger
+                        {% elif c.tipo_compromisso == 'TAREFA' %}bg-info
+                        {% elif c.tipo_compromisso == 'REUNIAO' %}bg-warning
+                        {% else %}bg-secondary{% endif %}">
+                        {{ c.tipo_compromisso }}
+                    </span>
+                </h5>
+                <small>{{ c.data_hora_inicio.strftime('%d/%m/%Y %H:%M') }}</small>
+            </div>
+            <p class="mb-1">{{ c.descricao or '' }}</p>
+            
+            {% if c.nome_disciplina %}
+            <div class="mt-2 p-2 bg-light border rounded">
+                <strong>Turma:</strong> {{ c.nome_disciplina }} <br>
+                <strong>Professor:</strong> {{ c.professor_nome }}
+            </div>
+            {% elif c.aluno_nome %}
+            <div class="mt-2 p-2 bg-light border rounded">
+                <strong>Para:</strong> Aluno {{ c.aluno_nome }}
+            </div>
+            {% else %}
+            <small class="text-muted">Compromisso Geral</small>
+            {% endif %}
+
+            <div class="mt-2">
+                 <form action="{{ url_for('delete_compromisso', id=c.compromisso_id) }}" method="post" style="display:inline;">
+                    <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Tem certeza?');">Excluir</button>
+                </form>
+            </div>
+        </div>
+        {% else %}
+        <p>Nenhum compromisso encontrado.</p>
+        {% endfor %}
+    </div>
+{% endblock %}
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\compromisso_form.html
+
+{% extends 'layout.html' %}
+
+{% block content %}
+    <h2>Adicionar Novo Compromisso</h2>
+    <form method="post">
+        <div class="mb-3">
+            <label for="titulo" class="form-label">TÃ­tulo</label>
+            <input type="text" class="form-control" id="titulo" name="titulo" required>
+        </div>
+        <div class="mb-3">
+            <label for="descricao" class="form-label">DescriÃ§Ã£o</label>
+            <textarea class="form-control" id="descricao" name="descricao" rows="3"></textarea>
+        </div>
+        <div class="mb-3">
+            <label for="data_hora_inicio" class="form-label">Data e Hora de InÃ­cio</label>
+            <input type="datetime-local" class="form-control" id="data_hora_inicio" name="data_hora_inicio" required>
+        </div>
+        <div class="mb-3">
+            <label for="tipo_compromisso" class="form-label">Tipo de Compromisso</label>
+            <select class="form-select" id="tipo_compromisso" name="tipo_compromisso">
+                <option value="TAREFA">Tarefa</option>
+                <option value="PROVA">Prova</option>
+                <option value="REUNIAO">ReuniÃ£o</option>
+                <option value="OUTRO">Outro</option>
+            </select>
+        </div>
+
+        <hr>
+        <h5>Associar Compromisso a:</h5>
+        <div class="mb-3">
+            <label for="turma_id" class="form-label">Uma Turma (Disciplina + Professor)</label>
+            <select class="form-select" id="turma_id" name="turma_id">
+                <option value="0">Nenhuma</option>
+                {% for turma in turmas %}
+                <option value="{{ turma.usuario_id }}-{{ turma.disciplina_id }}">{{ turma.nome_disciplina }} (Prof. {{ turma.professor_nome }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="text-center my-2"><strong>OU</strong></div>
+        <div class="mb-3">
+            <label for="aluno_id" class="form-label">Um Aluno EspecÃ­fico</label>
+            <select class="form-select" id="aluno_id" name="aluno_id">
+                <option value="0">Nenhum</option>
+                {% for aluno in alunos %}
+                <option value="{{ aluno.usuario_id }}">{{ aluno.nome_completo }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Salvar</button>
+        <a href="{{ url_for('list_compromissos') }}" class="btn btn-secondary">Cancelar</a>
+    </form>
+
+    <script>
+        // Garante que apenas um dropdown (turma ou aluno) possa ser selecionado por vez
+        const turmaSelect = document.getElementById('turma_id');
+        const alunoSelect = document.getElementById('aluno_id');
+
+        turmaSelect.addEventListener('change', function() {
+            if (this.value !== '0') {
+                alunoSelect.value = '0';
+            }
+        });
+
+        alunoSelect.addEventListener('change', function() {
+            if (this.value !== '0') {
+                turmaSelect.value = '0';
+            }
+        });
+    </script>
+{% endblock %}
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\disciplinas.html
+
+{% extends 'layout.html' %}
+
+{% block content %}
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2>Disciplinas</h2>
+        <a href="{{ url_for('add_disciplina') }}" class="btn btn-primary">Adicionar Disciplina</a>
+    </div>
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Nome da Disciplina</th>
+                <th>CÃ³digo</th>
+                <th>Carga HorÃ¡ria</th>
+                <th>AÃ§Ãµes</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for disciplina in disciplinas %}
+            <tr>
+                <td>{{ disciplina.disciplina_id }}</td>
+                <td>{{ disciplina.nome_disciplina }}</td>
+                <td>{{ disciplina.codigo_disciplina }}</td>
+                <td>{{ disciplina.carga_horaria or 'N/A' }}</td>
+                <td>
+                    <a href="{{ url_for('edit_disciplina', id=disciplina.disciplina_id) }}" class="btn btn-sm btn-warning">Editar</a>
+                    <form action="{{ url_for('delete_disciplina', id=disciplina.disciplina_id) }}" method="post" style="display:inline;">
+                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Tem certeza? Isso excluirÃ¡ todos os vÃ­nculos e compromissos associados a esta disciplina.');">Excluir</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" class="text-center">Nenhuma disciplina cadastrada.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% endblock %}
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\disciplina_form.html
+
+{% extends 'layout.html' %}
+
+{% block content %}
+    <h2>{% if action == 'add' %}Adicionar Nova Disciplina{% else %}Editar Disciplina{% endif %}</h2>
+    <form method="post">
+        <div class="mb-3">
+            <label for="nome_disciplina" class="form-label">Nome da Disciplina</label>
+            <input type="text" class="form-control" id="nome_disciplina" name="nome_disciplina" value="{{ disciplina.nome_disciplina if disciplina else '' }}" required>
+        </div>
+        <div class="mb-3">
+            <label for="codigo_disciplina" class="form-label">CÃ³digo da Disciplina</label>
+            <input type="text" class="form-control" id="codigo_disciplina" name="codigo_disciplina" value="{{ disciplina.codigo_disciplina if disciplina else '' }}" required>
+        </div>
+        <div class="mb-3">
+            <label for="carga_horaria" class="form-label">Carga HorÃ¡ria (horas)</label>
+            <input type="number" class="form-control" id="carga_horaria" name="carga_horaria" value="{{ disciplina.carga_horaria if disciplina else '' }}">
+        </div>
+        <button type="submit" class="btn btn-primary">Salvar</button>
+        <a href="{{ url_for('list_disciplinas') }}" class="btn btn-secondary">Cancelar</a>
+    </form>
+{% endblock %}
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\index.html
+
+{% extends 'layout.html' %}
+
+{% block content %}
+    <div class="p-5 mb-4 bg-light rounded-3">
+        <div class="container-fluid py-5">
+            <h1 class="display-5 fw-bold">Bem-vindo Ã  Agenda UniversitÃ¡ria</h1>
+            <p class="col-md-8 fs-4">Use a barra de navegaÃ§Ã£o acima para gerenciar alunos, professores, disciplinas e seus compromissos.</p>
+        </div>
+    </div>
+{% endblock %}
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\layout.html
+
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="/">Agenda Univ.</a>
+        <div class="collapse navbar-collapse">
+            <ul class="navbar-nav me-auto">
+                {% if session.usuario_id %}
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}">Home</a></li>
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('list_compromissos') }}">Minha Agenda</a></li>
+                    
+                    {% if session.tipo == 'ALUNO' %}
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('gerenciar_matriculas') }}">MatrÃ­cula</a></li>
+                    {% endif %}
+                    
+                    {% if session.tipo == 'ADMIN' %}
+                        <li class="nav-item"><a class="nav-link" href="/alunos">Gerenciar UsuÃ¡rios</a></li>
+                        <li class="nav-item"><a class="nav-link" href="/disciplinas">Disciplinas</a></li>
+                    {% endif %}
+                {% endif %}
+            </ul>
+            <ul class="navbar-nav">
+                {% if session.usuario_id %}
+                    <li class="nav-item"><span class="nav-link text-light">OlÃ¡, {{ session.nome }} ({{ session.tipo }})</span></li>
+                    <li class="nav-item"><a class="btn btn-outline-light btn-sm ms-2" href="{{ url_for('logout') }}">Sair</a></li>
+                {% else %}
+                    <li class="nav-item"><a class="nav-link" href="{{ url_for('login') }}">Login</a></li>
+                {% endif %}
+            </ul>
+        </div>
+    </div>
+</nav>
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\login.html
+
+{% extends 'layout.html' %}
+{% block content %}
+<div class="row justify-content-center mt-5">
+    <div class="col-md-4">
+        <div class="card shadow">
+            <div class="card-body">
+                <h3 class="text-center">Login AcadÃªmico</h3>
+                <form method="post">
+                    <div class="mb-3">
+                        <label>Email</label>
+                        <input type="email" name="email" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label>Senha</label>
+                        <input type="password" name="senha" class="form-control" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">Entrar</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\matriculas.html
+
+{% extends 'layout.html' %}
+{% block content %}
+<h2>MatrÃ­cula em Disciplinas</h2>
+<p class="text-muted">Selecione as disciplinas que vocÃª estÃ¡ cursando este semestre para ver as datas de provas e trabalhos na sua agenda.</p>
+
+<div class="row">
+    {% for d in disciplinas %}
+    <div class="col-md-4 mb-3">
+        <div class="card h-100 {% if d.matriculado %}border-success{% endif %}">
+            <div class="card-body">
+                <h5 class="card-title">{{ d.nome_disciplina }}</h5>
+                <h6 class="card-subtitle mb-2 text-muted">{{ d.codigo_disciplina }}</h6>
+                
+                {% if d.matriculado %}
+                    <button class="btn btn-success disabled w-100">Matriculado âœ…</button>
+                {% else %}
+                    <form method="post">
+                        <input type="hidden" name="disciplina_id" value="{{ d.disciplina_id }}">
+                        <button type="submit" class="btn btn-outline-primary w-100">Matricular-se</button>
+                    </form>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\professores.html
+
+{% extends 'layout.html' %}
+
+{% block content %}
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2>Professores</h2>
+        <a href="{{ url_for('add_professor') }}" class="btn btn-primary">Adicionar Professor</a>
+    </div>
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Nome Completo</th>
+                <th>Email</th>
+                <th>Departamento</th>
+                <th>AÃ§Ãµes</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for professor in professores %}
+            <tr>
+                <td>{{ professor.usuario_id }}</td>
+                <td>{{ professor.nome_completo }}</td>
+                <td>{{ professor.email }}</td>
+                <td>{{ professor.departamento }}</td>
+                <td>
+                    <a href="{{ url_for('edit_professor', id=professor.usuario_id) }}" class="btn btn-sm btn-warning">Editar</a>
+                    <form action="{{ url_for('delete_professor', id=professor.usuario_id) }}" method="post" style="display:inline;">
+                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Tem certeza? Excluir um professor pode afetar as turmas e compromissos associados.');">Excluir</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" class="text-center">Nenhum professor cadastrado.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% endblock %}
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\professor_form.html
+
+{% extends 'layout.html' %}
+
+{% block content %}
+    <h2>{% if action == 'add' %}Adicionar Novo Professor{% else %}Editar Professor{% endif %}</h2>
+    <form method="post">
+        <div class="mb-3">
+            <label for="nome_completo" class="form-label">Nome Completo</label>
+            <input type="text" class="form-control" id="nome_completo" name="nome_completo" value="{{ professor.nome_completo if professor else '' }}" required>
+        </div>
+        <div class="mb-3">
+            <label for="email" class="form-label">Email</label>
+            <input type="email" class="form-control" id="email" name="email" value="{{ professor.email if professor else '' }}" required>
+        </div>
+        <div class="mb-3">
+            <label for="departamento" class="form-label">Departamento</label>
+            <input type="text" class="form-control" id="departamento" name="departamento" value="{{ professor.departamento if professor else '' }}">
+        </div>
+        <button type="submit" class="btn btn-primary">Salvar</button>
+        <a href="{{ url_for('list_professores') }}" class="btn btn-secondary">Cancelar</a>
+    </form>
+{% endblock %}
+

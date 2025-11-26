@@ -1,0 +1,48 @@
+{% extends 'layout.html' %}
+
+{% block content %}
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2>Compromissos</h2>
+        <a href="{{ url_for('add_compromisso') }}" class="btn btn-primary">Adicionar Compromisso</a>
+    </div>
+    <div class="list-group">
+        {% for c in compromissos %}
+        <div class="list-group-item list-group-item-action flex-column align-items-start">
+            <div class="d-flex w-100 justify-content-between">
+                <h5 class="mb-1">{{ c.titulo }} 
+                    <span class="badge 
+                        {% if c.tipo_compromisso == 'PROVA' %}bg-danger
+                        {% elif c.tipo_compromisso == 'TAREFA' %}bg-info
+                        {% elif c.tipo_compromisso == 'REUNIAO' %}bg-warning
+                        {% else %}bg-secondary{% endif %}">
+                        {{ c.tipo_compromisso }}
+                    </span>
+                </h5>
+                <small>{{ c.data_hora_inicio.strftime('%d/%m/%Y %H:%M') }}</small>
+            </div>
+            <p class="mb-1">{{ c.descricao or '' }}</p>
+            
+            {% if c.nome_disciplina %}
+            <div class="mt-2 p-2 bg-light border rounded">
+                <strong>Turma:</strong> {{ c.nome_disciplina }} <br>
+                <strong>Professor:</strong> {{ c.professor_nome }}
+            </div>
+            {% elif c.aluno_nome %}
+            <div class="mt-2 p-2 bg-light border rounded">
+                <strong>Para:</strong> Aluno {{ c.aluno_nome }}
+            </div>
+            {% else %}
+            <small class="text-muted">Compromisso Geral</small>
+            {% endif %}
+
+            <div class="mt-2">
+                 <form action="{{ url_for('delete_compromisso', id=c.compromisso_id) }}" method="post" style="display:inline;">
+                    <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Tem certeza?');">Excluir</button>
+                </form>
+            </div>
+        </div>
+        {% else %}
+        <p>Nenhum compromisso encontrado.</p>
+        {% endfor %}
+    </div>
+{% endblock %}
