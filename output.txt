@@ -7,9 +7,9 @@ from functools import wraps
 from db_config import db_config
 
 app = Flask(__name__)
-app.secret_key = 'chave_secreta_segura' # Em prod, use variÃ¡vel de ambiente
+app.secret_key = 'chave_super_secreta_para_sessao'
 
-# --- ConexÃ£o DB ---
+# --- ConexÃ£o com o Banco de Dados ---
 def get_db_connection():
     try:
         conn = pymysql.connect(host=db_config['host'],
@@ -19,16 +19,25 @@ def get_db_connection():
                              cursorclass=pymysql.cursors.DictCursor)
         return conn
     except pymysql.MySQLError as err:
-        print(f"Erro DB: {err}")
+        print(f"Erro de conexÃ£o com o banco: {err}")
         return None
 
-# --- Decorator de Login ---
+# --- Decorators de SeguranÃ§a ---
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'usuario_id' not in session:
             flash("Por favor, faÃ§a login para acessar.", "warning")
             return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if session.get('tipo') != 'ADMIN':
+            flash("Acesso negado. Requer privilÃ©gios de Administrador.", "danger")
+            return redirect(url_for('dashboard'))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -40,8 +49,12 @@ def login():
         senha = request.form['senha']
         
         conn = get_db_connection()
+        if not conn:
+            flash("Erro ao conectar ao banco de dados.", "danger")
+            return render_template('login.html')
+            
         cursor = conn.cursor()
-        # Nota: Em produÃ§Ã£o, use hash real (bcrypt/argon2). Aqui compara string simples conforme PDF.
+        # Nota: Em produÃ§Ã£o, utilize hash de senha (bcrypt)
         cursor.execute("SELECT * FROM Usuario WHERE email = %s AND senha_hash = %s", (email, senha))
         user = cursor.fetchone()
         cursor.close()
@@ -62,39 +75,42 @@ def logout():
     session.clear()
     return redirect(url_for('login'))
 
-# --- Dashboard (A "Cara" da Agenda) ---
+# --- Dashboard ---
 @app.route('/')
 @login_required
 def dashboard():
     return render_template('dashboard.html')
 
-# --- MatrÃ­culas (Novo: Resolve a crÃ­tica de vÃ­nculo Aluno-Disciplina) ---
+# ==============================================================================
+#      LÃ“GICA ACADÃŠMICA (ALUNO, PROFESSOR, AGENDA)
+# ==============================================================================
+
+# --- MatrÃ­cula (Aluno) ---
 @app.route('/matriculas', methods=['GET', 'POST'])
 @login_required
 def gerenciar_matriculas():
-    # Apenas Alunos se matriculam ou Admins matriculam alunos. 
-    # SimplificaÃ§Ã£o: O prÃ³prio aluno se matricula.
     if session['tipo'] != 'ALUNO':
-         flash("Apenas alunos podem realizar matrÃ­culas nesta versÃ£o.", "info")
+         flash("Apenas alunos podem realizar matrÃ­culas.", "info")
          return redirect(url_for('dashboard'))
 
     conn = get_db_connection()
+    if not conn: return redirect(url_for('dashboard'))
     cursor = conn.cursor()
 
     if request.method == 'POST':
         disciplina_id = request.form['disciplina_id']
-        semestre = "2024.1" # Hardcoded para exemplo
+        semestre = "2024.1" 
         
         try:
             cursor.execute("INSERT INTO Matricula (usuario_id, disciplina_id, semestre) VALUES (%s, %s, %s)",
                            (session['usuario_id'], disciplina_id, semestre))
             conn.commit()
-            flash('MatrÃ­cula realizada com sucesso!', 'success')
+            flash('MatrÃ­cula realizada com sucesso! Agora vocÃª verÃ¡ a agenda desta matÃ©ria.', 'success')
         except pymysql.MySQLError as e:
             conn.rollback()
-            flash(f'Erro na matrÃ­cula (jÃ¡ matriculado?): {e}', 'danger')
+            flash(f'Erro na matrÃ­cula (vocÃª jÃ¡ estÃ¡ matriculado?): {e}', 'danger')
 
-    # Listar disciplinas disponÃ­veis vs disciplinas jÃ¡ matriculadas
+    # Lista disciplinas e marca se o aluno jÃ¡ tem matrÃ­cula
     cursor.execute("""
         SELECT d.*, 
             (SELECT COUNT(*) FROM Matricula m WHERE m.disciplina_id = d.disciplina_id AND m.usuario_id = %s) as matriculado
@@ -106,24 +122,22 @@ def gerenciar_matriculas():
     conn.close()
     return render_template('matriculas.html', disciplinas=disciplinas)
 
-# --- Compromissos (LÃ³gica alterada para visÃ£o do UsuÃ¡rio) ---
+# --- Agenda (Compromissos) ---
 @app.route('/compromissos')
 @login_required
 def list_compromissos():
     conn = get_db_connection()
+    if not conn: return redirect(url_for('dashboard'))
     cursor = conn.cursor()
     
-    user_id = session['usuario_id']
+    uid = session['usuario_id']
     tipo = session['tipo']
 
-    # LÃ³gica CrÃ­tica: O que cada um vÃª?
-    query = ""
-    params = ()
-
+    # LÃ³gica de VisualizaÃ§Ã£o baseada no Papel
     if tipo == 'ALUNO':
-        # Aluno vÃª: Seus compromissos pessoais OU Compromissos das turmas (Prof_Disc) onde ele tem MatrÃ­cula
+        # Aluno vÃª: Seus Pessoais + Eventos das Turmas onde tem MatrÃ­cula
         query = """
-            SELECT c.*, d.nome_disciplina, u_prof.nome_completo as professor_nome
+            SELECT c.*, d.nome_disciplina, u_prof.nome_completo as autor_nome
             FROM Compromisso c
             LEFT JOIN Disciplina d ON c.turma_disciplina_id = d.disciplina_id
             LEFT JOIN Usuario u_prof ON c.turma_usuario_id = u_prof.usuario_id
@@ -132,24 +146,30 @@ def list_compromissos():
                OR (c.turma_usuario_id IS NOT NULL AND m.usuario_id IS NOT NULL)
             ORDER BY c.data_hora_inicio ASC
         """
-        params = (user_id, user_id)
+        cursor.execute(query, (uid, uid))
         
     elif tipo == 'PROFESSOR':
-        # Professor vÃª: Compromissos que ELE criou para suas turmas
+        # Professor vÃª: Apenas o que ele criou para suas turmas
         query = """
-            SELECT c.*, d.nome_disciplina
+            SELECT c.*, d.nome_disciplina, 'VocÃª' as autor_nome
             FROM Compromisso c
-            LEFT JOIN Disciplina d ON c.turma_disciplina_id = d.disciplina_id
+            JOIN Disciplina d ON c.turma_disciplina_id = d.disciplina_id
             WHERE c.turma_usuario_id = %s
             ORDER BY c.data_hora_inicio ASC
         """
-        params = (user_id,)
+        cursor.execute(query, (uid,))
         
     else: # ADMIN
-        query = "SELECT * FROM Compromisso ORDER BY data_hora_inicio DESC"
-        params = ()
+        # Admin vÃª tudo
+        query = """
+            SELECT c.*, d.nome_disciplina, u.nome_completo as autor_nome
+            FROM Compromisso c
+            LEFT JOIN Disciplina d ON c.turma_disciplina_id = d.disciplina_id
+            LEFT JOIN Usuario u ON c.turma_usuario_id = u.usuario_id
+            ORDER BY c.data_hora_inicio DESC
+        """
+        cursor.execute(query)
 
-    cursor.execute(query, params)
     compromissos = cursor.fetchall()
     cursor.close()
     conn.close()
@@ -159,27 +179,50 @@ def list_compromissos():
 @login_required
 def add_compromisso():
     conn = get_db_connection()
+    if not conn: return redirect(url_for('dashboard'))
     cursor = conn.cursor()
+
+    tipo_usuario = session['tipo']
 
     if request.method == 'POST':
         titulo = request.form['titulo']
         descricao = request.form['descricao']
         inicio = request.form['data_hora_inicio']
-        fim = request.form.get('data_hora_fim') or None # Novo campo PDF
+        fim = request.form.get('data_hora_fim') or None
         tipo_comp = request.form['tipo_compromisso']
         
-        # DefiniÃ§Ã£o de escopo baseada em quem estÃ¡ logado
+        # VariÃ¡veis de escopo
         aluno_id = None
         turma_prof_id = None
         turma_disc_id = None
 
-        if session['tipo'] == 'ALUNO':
-            aluno_id = session['usuario_id'] # Compromisso Pessoal
-        elif session['tipo'] == 'PROFESSOR':
-            # Professor seleciona para qual turma Ã© o compromisso
-            turma_selection = request.form.get('turma_id') # formato "prof_id-disc_id"
-            if turma_selection:
-                turma_prof_id, turma_disc_id = turma_selection.split('-')
+        if tipo_usuario == 'ALUNO':
+            # Aluno sÃ³ cria compromisso pessoal
+            aluno_id = session['usuario_id']
+            # SeguranÃ§a: ForÃ§ar tipo para evitar que aluno crie "PROVA" fake
+            if tipo_comp not in ['TAREFA', 'OUTRO']: 
+                tipo_comp = 'OUTRO'
+
+        elif tipo_usuario == 'PROFESSOR':
+            # Professor deve selecionar a turma
+            turma_str = request.form.get('turma_id') # Formato "IDPROF-IDDISC"
+            
+            if not turma_str:
+                flash('Erro: Professores devem selecionar uma turma.', 'danger')
+                return redirect(url_for('add_compromisso'))
+            
+            p_id, d_id = turma_str.split('-')
+            
+            # SeguranÃ§a: Verificar se o professor realmente Ã© dono dessa turma
+            cursor.execute("SELECT * FROM Professor_Disciplina WHERE usuario_id=%s AND disciplina_id=%s", (p_id, d_id))
+            alocacao = cursor.fetchone()
+            
+            if not alocacao or int(p_id) != session['usuario_id']:
+                flash('Acesso negado: VocÃª nÃ£o leciona esta disciplina.', 'danger')
+                return redirect(url_for('add_compromisso'))
+            
+            turma_prof_id = p_id
+            turma_disc_id = d_id
 
         try:
             cursor.execute("""
@@ -188,18 +231,18 @@ def add_compromisso():
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """, (titulo, descricao, inicio, fim, tipo_comp, aluno_id, turma_prof_id, turma_disc_id))
             conn.commit()
-            flash('Compromisso agendado!', 'success')
+            flash('Compromisso agendado com sucesso!', 'success')
         except pymysql.MySQLError as err:
-            flash(f'Erro: {err}', 'danger')
+            conn.rollback()
+            flash(f'Erro ao salvar: {err}', 'danger')
         
         cursor.close()
         conn.close()
         return redirect(url_for('list_compromissos'))
 
-    # Preparar dados para o formulÃ¡rio
+    # GET: Carregar turmas se for professor
     turmas_professor = []
-    if session['tipo'] == 'PROFESSOR':
-        # Buscar turmas que este professor leciona (Professor_Disciplina)
+    if tipo_usuario == 'PROFESSOR':
         cursor.execute("""
             SELECT pd.usuario_id, pd.disciplina_id, d.nome_disciplina
             FROM Professor_Disciplina pd
@@ -212,10 +255,358 @@ def add_compromisso():
     conn.close()
     return render_template('compromisso_form.html', turmas=turmas_professor)
 
-# --- Rotas CRUD Admin (Alunos, Profs, Disciplinas) ---
-# (Manter as rotas anteriores de CRUD, mas adicionar @login_required 
-# e verificar se session['tipo'] == 'ADMIN' para seguranÃ§a extra)
-# ... [CÃ³digo CRUD anterior aqui] ...
+@app.route('/compromissos/delete/<int:id>', methods=['POST'])
+@login_required
+def delete_compromisso(id):
+    conn = get_db_connection()
+    if not conn: return redirect(url_for('list_compromissos'))
+    cursor = conn.cursor()
+    try:
+        # SeguranÃ§a: SÃ³ deleta se for o dono do registro
+        if session['tipo'] == 'ALUNO':
+            cursor.execute("DELETE FROM Compromisso WHERE compromisso_id = %s AND aluno_usuario_id = %s", (id, session['usuario_id']))
+        elif session['tipo'] == 'PROFESSOR':
+             cursor.execute("DELETE FROM Compromisso WHERE compromisso_id = %s AND turma_usuario_id = %s", (id, session['usuario_id']))
+        else: # Admin pode tudo
+            cursor.execute("DELETE FROM Compromisso WHERE compromisso_id = %s", (id,))
+            
+        conn.commit()
+        flash('Compromisso removido.', 'success')
+    except pymysql.MySQLError as err:
+        flash(f'Erro ao remover: {err}', 'danger')
+    finally:
+        cursor.close()
+        conn.close()
+    return redirect(url_for('list_compromissos'))
+
+# ==============================================================================
+#      ÃREA DO ADMINISTRADOR (CONFIGURAÃ‡ÃƒO E CRUDs)
+# ==============================================================================
+
+# --- Nova Funcionalidade: AlocaÃ§Ã£o (Liga Professor Ã  Disciplina) ---
+@app.route('/admin/alocacao', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def alocacao_professor():
+    conn = get_db_connection()
+    if not conn: return redirect(url_for('dashboard'))
+    cursor = conn.cursor()
+
+    if request.method == 'POST':
+        prof_id = request.form['professor_id']
+        disc_id = request.form['disciplina_id']
+        semestre = "2024.1" 
+        
+        try:
+            cursor.execute("INSERT INTO Professor_Disciplina (usuario_id, disciplina_id, semestre) VALUES (%s, %s, %s)",
+                           (prof_id, disc_id, semestre))
+            conn.commit()
+            flash('Professor vinculado Ã  disciplina com sucesso!', 'success')
+        except pymysql.MySQLError as e:
+            conn.rollback()
+            flash(f'Erro ao vincular (talvez jÃ¡ exista?): {e}', 'danger')
+
+    # Buscar dados para popular os selects
+    cursor.execute("SELECT u.usuario_id, u.nome_completo FROM Usuario u WHERE u.tipo_usuario = 'PROFESSOR'")
+    professores = cursor.fetchall()
+    
+    cursor.execute("SELECT * FROM Disciplina ORDER BY nome_disciplina")
+    disciplinas = cursor.fetchall()
+    
+    # Listar alocaÃ§Ãµes existentes para visualizaÃ§Ã£o
+    cursor.execute("""
+        SELECT pd.*, u.nome_completo, d.nome_disciplina 
+        FROM Professor_Disciplina pd
+        JOIN Usuario u ON pd.usuario_id = u.usuario_id
+        JOIN Disciplina d ON pd.disciplina_id = d.disciplina_id
+        ORDER BY d.nome_disciplina
+    """)
+    alocacoes = cursor.fetchall()
+    
+    cursor.close()
+    conn.close()
+    return render_template('admin_alocacao.html', professores=professores, disciplinas=disciplinas, alocacoes=alocacoes)
+
+# --- CRUD ALUNOS ---
+@app.route('/alunos')
+@login_required
+@admin_required
+def list_alunos():
+    conn = get_db_connection()
+    if not conn: return redirect(url_for('dashboard'))
+    cursor = conn.cursor()
+    query = """
+        SELECT u.usuario_id, u.nome_completo, u.email, a.matricula
+        FROM Usuario u
+        JOIN Aluno a ON u.usuario_id = a.usuario_id
+        WHERE u.tipo_usuario = 'ALUNO'
+        ORDER BY u.nome_completo
+    """
+    cursor.execute(query)
+    alunos = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return render_template('alunos.html', alunos=alunos)
+
+@app.route('/alunos/add', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def add_aluno():
+    if request.method == 'POST':
+        nome = request.form['nome_completo']
+        email = request.form['email']
+        matricula = request.form['matricula']
+        senha_hash = "123456" 
+
+        conn = get_db_connection()
+        if not conn: return redirect(url_for('list_alunos'))
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO Usuario (nome_completo, email, senha_hash, tipo_usuario) VALUES (%s, %s, %s, 'ALUNO')", (nome, email, senha_hash))
+            usuario_id = cursor.lastrowid
+            cursor.execute("INSERT INTO Aluno (usuario_id, matricula) VALUES (%s, %s)", (usuario_id, matricula))
+            conn.commit()
+            flash('Aluno adicionado! Senha padrÃ£o: 123456', 'success')
+        except pymysql.MySQLError as err:
+            conn.rollback()
+            flash(f'Erro: {err}', 'danger')
+        finally:
+            cursor.close()
+            conn.close()
+        return redirect(url_for('list_alunos'))
+    return render_template('aluno_form.html', action='add')
+
+@app.route('/alunos/edit/<int:id>', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def edit_aluno(id):
+    conn = get_db_connection()
+    if not conn: return redirect(url_for('list_alunos'))
+    cursor = conn.cursor()
+
+    if request.method == 'POST':
+        nome = request.form['nome_completo']
+        email = request.form['email']
+        matricula = request.form['matricula']
+        try:
+            cursor.execute("UPDATE Usuario SET nome_completo=%s, email=%s WHERE usuario_id=%s", (nome, email, id))
+            cursor.execute("UPDATE Aluno SET matricula=%s WHERE usuario_id=%s", (matricula, id))
+            conn.commit()
+            flash('Aluno atualizado!', 'success')
+        except pymysql.MySQLError as err:
+            conn.rollback()
+            flash(f'Erro: {err}', 'danger')
+        finally:
+            cursor.close()
+            conn.close()
+        return redirect(url_for('list_alunos'))
+    
+    cursor.execute("SELECT u.usuario_id, u.nome_completo, u.email, a.matricula FROM Usuario u JOIN Aluno a ON u.usuario_id = a.usuario_id WHERE u.usuario_id = %s", (id,))
+    aluno = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return render_template('aluno_form.html', action='edit', aluno=aluno)
+
+@app.route('/alunos/delete/<int:id>', methods=['POST'])
+@login_required
+@admin_required
+def delete_aluno(id):
+    conn = get_db_connection()
+    if not conn: return redirect(url_for('list_alunos'))
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM Usuario WHERE usuario_id = %s", (id,))
+        conn.commit()
+        flash('Aluno removido!', 'success')
+    except pymysql.MySQLError as err:
+        flash(f'Erro: {err}', 'danger')
+    finally:
+        cursor.close()
+        conn.close()
+    return redirect(url_for('list_alunos'))
+
+# --- CRUD PROFESSORES ---
+@app.route('/professores')
+@login_required
+@admin_required
+def list_professores():
+    conn = get_db_connection()
+    if not conn: return redirect(url_for('dashboard'))
+    cursor = conn.cursor()
+    query = """
+        SELECT u.usuario_id, u.nome_completo, u.email, p.departamento
+        FROM Usuario u
+        JOIN Professor p ON u.usuario_id = p.usuario_id
+        WHERE u.tipo_usuario = 'PROFESSOR'
+        ORDER BY u.nome_completo
+    """
+    cursor.execute(query)
+    professores = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return render_template('professores.html', professores=professores)
+
+@app.route('/professores/add', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def add_professor():
+    if request.method == 'POST':
+        nome = request.form['nome_completo']
+        email = request.form['email']
+        departamento = request.form['departamento']
+        senha_hash = "123456"
+
+        conn = get_db_connection()
+        if not conn: return redirect(url_for('list_professores'))
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO Usuario (nome_completo, email, senha_hash, tipo_usuario) VALUES (%s, %s, %s, 'PROFESSOR')", (nome, email, senha_hash))
+            usuario_id = cursor.lastrowid
+            cursor.execute("INSERT INTO Professor (usuario_id, departamento) VALUES (%s, %s)", (usuario_id, departamento))
+            conn.commit()
+            flash('Professor adicionado! Senha padrÃ£o: 123456', 'success')
+        except pymysql.MySQLError as err:
+            conn.rollback()
+            flash(f'Erro: {err}', 'danger')
+        finally:
+            cursor.close()
+            conn.close()
+        return redirect(url_for('list_professores'))
+    return render_template('professor_form.html', action='add')
+
+@app.route('/professores/edit/<int:id>', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def edit_professor(id):
+    conn = get_db_connection()
+    if not conn: return redirect(url_for('list_professores'))
+    cursor = conn.cursor()
+    if request.method == 'POST':
+        nome = request.form['nome_completo']
+        email = request.form['email']
+        departamento = request.form['departamento']
+        try:
+            cursor.execute("UPDATE Usuario SET nome_completo=%s, email=%s WHERE usuario_id=%s", (nome, email, id))
+            cursor.execute("UPDATE Professor SET departamento=%s WHERE usuario_id=%s", (departamento, id))
+            conn.commit()
+            flash('Professor atualizado!', 'success')
+        except pymysql.MySQLError as err:
+            conn.rollback()
+            flash(f'Erro: {err}', 'danger')
+        finally:
+            cursor.close()
+            conn.close()
+        return redirect(url_for('list_professores'))
+    
+    cursor.execute("SELECT u.usuario_id, u.nome_completo, u.email, p.departamento FROM Usuario u JOIN Professor p ON u.usuario_id = p.usuario_id WHERE u.usuario_id = %s", (id,))
+    professor = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return render_template('professor_form.html', action='edit', professor=professor)
+
+@app.route('/professores/delete/<int:id>', methods=['POST'])
+@login_required
+@admin_required
+def delete_professor(id):
+    conn = get_db_connection()
+    if not conn: return redirect(url_for('list_professores'))
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM Usuario WHERE usuario_id = %s", (id,))
+        conn.commit()
+        flash('Professor removido!', 'success')
+    except pymysql.MySQLError as err:
+        flash(f'Erro: {err}', 'danger')
+    finally:
+        cursor.close()
+        conn.close()
+    return redirect(url_for('list_professores'))
+
+# --- CRUD DISCIPLINAS ---
+@app.route('/disciplinas')
+@login_required
+@admin_required
+def list_disciplinas():
+    conn = get_db_connection()
+    if not conn: return redirect(url_for('dashboard'))
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM Disciplina ORDER BY nome_disciplina")
+    disciplinas = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return render_template('disciplinas.html', disciplinas=disciplinas)
+
+@app.route('/disciplinas/add', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def add_disciplina():
+    if request.method == 'POST':
+        nome = request.form['nome_disciplina']
+        codigo = request.form['codigo_disciplina']
+        carga = request.form.get('carga_horaria') or None
+        
+        conn = get_db_connection()
+        if not conn: return redirect(url_for('list_disciplinas'))
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO Disciplina (nome_disciplina, codigo_disciplina, carga_horaria) VALUES (%s, %s, %s)", (nome, codigo, carga))
+            conn.commit()
+            flash('Disciplina adicionada!', 'success')
+        except pymysql.MySQLError as err:
+            flash(f'Erro: {err}', 'danger')
+        finally:
+            cursor.close()
+            conn.close()
+        return redirect(url_for('list_disciplinas'))
+    return render_template('disciplina_form.html', action='add')
+
+@app.route('/disciplinas/edit/<int:id>', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def edit_disciplina(id):
+    conn = get_db_connection()
+    if not conn: return redirect(url_for('list_disciplinas'))
+    cursor = conn.cursor()
+    
+    if request.method == 'POST':
+        nome = request.form['nome_disciplina']
+        codigo = request.form['codigo_disciplina']
+        carga = request.form.get('carga_horaria') or None
+        try:
+            cursor.execute("UPDATE Disciplina SET nome_disciplina=%s, codigo_disciplina=%s, carga_horaria=%s WHERE disciplina_id=%s", (nome, codigo, carga, id))
+            conn.commit()
+            flash('Disciplina atualizada!', 'success')
+        except pymysql.MySQLError as err:
+            flash(f'Erro: {err}', 'danger')
+        finally:
+            cursor.close()
+            conn.close()
+        return redirect(url_for('list_disciplinas'))
+
+    cursor.execute("SELECT * FROM Disciplina WHERE disciplina_id = %s", (id,))
+    disciplina = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return render_template('disciplina_form.html', action='edit', disciplina=disciplina)
+
+@app.route('/disciplinas/delete/<int:id>', methods=['POST'])
+@login_required
+@admin_required
+def delete_disciplina(id):
+    conn = get_db_connection()
+    if not conn: return redirect(url_for('list_disciplinas'))
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM Disciplina WHERE disciplina_id = %s", (id,))
+        conn.commit()
+        flash('Disciplina removida!', 'success')
+    except pymysql.MySQLError as err:
+        conn.rollback()
+        flash(f'Erro: {err}', 'danger')
+    finally:
+        cursor.close()
+        conn.close()
+    return redirect(url_for('list_disciplinas'))
 
 if __name__ == '__main__':
     app.run(debug=True)
@@ -229,6 +620,76 @@ db_config = {
     'password': 'SPQR#Invictus476',    # Substitua pela sua senha
     'database': 'agenda_academica' # Nome do banco de dados atualizado
 }
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\admin_alocacao.html
+
+{% extends 'layout.html' %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2>AlocaÃ§Ã£o de Professores</h2>
+        <a href="{{ url_for('dashboard') }}" class="btn btn-secondary btn-sm">Voltar</a>
+    </div>
+    
+    <p class="text-muted">Defina qual professor leciona qual disciplina. Isso permitirÃ¡ que o professor agende avaliaÃ§Ãµes para os alunos matriculados.</p>
+
+    <div class="card mb-4 border-primary">
+        <div class="card-header bg-primary text-white">Nova AlocaÃ§Ã£o</div>
+        <div class="card-body">
+            <form method="post" class="row g-3 align-items-end">
+                <div class="col-md-5">
+                    <label class="form-label">Professor</label>
+                    <select name="professor_id" class="form-select" required>
+                        <option value="">Escolha...</option>
+                        {% for p in professores %}
+                        <option value="{{ p.usuario_id }}">{{ p.nome_completo }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-5">
+                    <label class="form-label">Disciplina</label>
+                    <select name="disciplina_id" class="form-select" required>
+                        <option value="">Escolha...</option>
+                        {% for d in disciplinas %}
+                        <option value="{{ d.disciplina_id }}">{{ d.nome_disciplina }} ({{ d.codigo_disciplina }})</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <button type="submit" class="btn btn-success w-100">Vincular</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <h4>AlocaÃ§Ãµes Atuais</h4>
+    <div class="table-responsive">
+        <table class="table table-hover table-striped">
+            <thead class="table-light">
+                <tr>
+                    <th>Disciplina</th>
+                    <th>Professor ResponsÃ¡vel</th>
+                    <th>Semestre</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for a in alocacoes %}
+                <tr>
+                    <td>{{ a.nome_disciplina }}</td>
+                    <td>{{ a.nome_completo }}</td>
+                    <td>{{ a.semestre }}</td>
+                    <td><span class="badge bg-success">Ativo</span></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" class="text-center text-muted">Nenhuma turma formada ainda.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
 
 # C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\alunos.html
 
@@ -349,73 +810,143 @@ db_config = {
 {% extends 'layout.html' %}
 
 {% block content %}
-    <h2>Adicionar Novo Compromisso</h2>
-    <form method="post">
-        <div class="mb-3">
-            <label for="titulo" class="form-label">TÃ­tulo</label>
-            <input type="text" class="form-control" id="titulo" name="titulo" required>
+<div class="container mt-4">
+    <div class="card shadow">
+        <div class="card-header bg-primary text-white">
+            <h4 class="mb-0">Agendar Compromisso</h4>
         </div>
-        <div class="mb-3">
-            <label for="descricao" class="form-label">DescriÃ§Ã£o</label>
-            <textarea class="form-control" id="descricao" name="descricao" rows="3"></textarea>
-        </div>
-        <div class="mb-3">
-            <label for="data_hora_inicio" class="form-label">Data e Hora de InÃ­cio</label>
-            <input type="datetime-local" class="form-control" id="data_hora_inicio" name="data_hora_inicio" required>
-        </div>
-        <div class="mb-3">
-            <label for="tipo_compromisso" class="form-label">Tipo de Compromisso</label>
-            <select class="form-select" id="tipo_compromisso" name="tipo_compromisso">
-                <option value="TAREFA">Tarefa</option>
-                <option value="PROVA">Prova</option>
-                <option value="REUNIAO">ReuniÃ£o</option>
-                <option value="OUTRO">Outro</option>
-            </select>
-        </div>
+        <div class="card-body">
+            <form method="post" id="formCompromisso">
+                
+                <!-- 1. TÃ­tulo e Data (Comum a todos) -->
+                <div class="row mb-3">
+                    <div class="col-md-8">
+                        <label class="form-label">TÃ­tulo</label>
+                        <input type="text" name="titulo" class="form-control" required placeholder="Ex: Prova 1, Entrega de Lista...">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Data e Hora InÃ­cio</label>
+                        <input type="datetime-local" name="data_hora_inicio" class="form-control" required>
+                    </div>
+                </div>
 
-        <hr>
-        <h5>Associar Compromisso a:</h5>
-        <div class="mb-3">
-            <label for="turma_id" class="form-label">Uma Turma (Disciplina + Professor)</label>
-            <select class="form-select" id="turma_id" name="turma_id">
-                <option value="0">Nenhuma</option>
-                {% for turma in turmas %}
-                <option value="{{ turma.usuario_id }}-{{ turma.disciplina_id }}">{{ turma.nome_disciplina }} (Prof. {{ turma.professor_nome }})</option>
-                {% endfor %}
-            </select>
+                <!-- 2. Tipo de Compromisso (Dropdown Condicional) -->
+                <div class="mb-3">
+                    <label class="form-label">Tipo de Evento</label>
+                    <select class="form-select" name="tipo_compromisso" id="selectTipo" required>
+                        {% if session['tipo'] == 'PROFESSOR' %}
+                            <option value="PROVA">ðŸ“š Prova (AvaliaÃ§Ã£o)</option>
+                            <option value="TAREFA">ðŸ“ Trabalho / Entrega</option>
+                            <option value="REUNIAO">ðŸ“¢ Aviso Importante</option>
+                        {% else %}
+                            <option value="TAREFA">ðŸ“Œ Estudo Pessoal</option>
+                            <option value="OUTRO">ðŸŽˆ Lembrete Pessoal</option>
+                        {% endif %}
+                    </select>
+                </div>
+
+                <!-- 3. SeleÃ§Ã£o de Turma (Apenas para Professores) -->
+                {% if session['tipo'] == 'PROFESSOR' %}
+                <div class="mb-3 p-3 bg-light border rounded" id="divTurma">
+                    <label class="form-label fw-bold text-primary">Vincular Ã  Disciplina:</label>
+                    <p class="small text-muted mb-1">Este evento aparecerÃ¡ para todos os alunos matriculados nesta matÃ©ria.</p>
+                    
+                    {% if turmas %}
+                        <select class="form-select" name="turma_id" required>
+                            <option value="" disabled selected>Selecione a matÃ©ria...</option>
+                            {% for t in turmas %}
+                                <option value="{{ t.usuario_id }}-{{ t.disciplina_id }}">{{ t.nome_disciplina }}</option>
+                            {% endfor %}
+                        </select>
+                    {% else %}
+                        <div class="alert alert-warning">
+                            <i class="bi bi-exclamation-triangle"></i>
+                            VocÃª nÃ£o estÃ¡ vinculado a nenhuma disciplina. 
+                            <br>Entre em contato com a administraÃ§Ã£o para realizar sua alocaÃ§Ã£o.
+                        </div>
+                    {% endif %}
+                </div>
+                {% endif %}
+
+                <div class="mb-3">
+                    <label class="form-label">Detalhes Adicionais</label>
+                    <textarea name="descricao" class="form-control" rows="3"></textarea>
+                </div>
+
+                <div class="d-flex justify-content-end gap-2">
+                    <a href="{{ url_for('list_compromissos') }}" class="btn btn-secondary">Cancelar</a>
+                    <button type="submit" class="btn btn-success">Salvar Agenda</button>
+                </div>
+            </form>
         </div>
-        <div class="text-center my-2"><strong>OU</strong></div>
-        <div class="mb-3">
-            <label for="aluno_id" class="form-label">Um Aluno EspecÃ­fico</label>
-            <select class="form-select" id="aluno_id" name="aluno_id">
-                <option value="0">Nenhum</option>
-                {% for aluno in alunos %}
-                <option value="{{ aluno.usuario_id }}">{{ aluno.nome_completo }}</option>
-                {% endfor %}
-            </select>
+    </div>
+</div>
+{% endblock %}
+
+# C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\dashboard.html
+
+{% extends 'layout.html' %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="p-5 mb-4 bg-light rounded-3 shadow-sm">
+        <div class="container-fluid py-2">
+            <h1 class="display-5 fw-bold">Bem-vindo, {{ session['nome'] }}!</h1>
+            <p class="fs-4">Painel do {{ session['tipo'].capitalize() }}</p>
+            
+            <hr class="my-4">
+
+            <div class="d-grid gap-3 d-sm-flex">
+                <!-- BotÃ£o Comum: Minha Agenda -->
+                <a href="{{ url_for('list_compromissos') }}" class="btn btn-primary btn-lg px-4 gap-3">
+                    ðŸ“… Minha Agenda
+                </a>
+
+                <!-- OpÃ§Ãµes para ALUNOS -->
+                {% if session['tipo'] == 'ALUNO' %}
+                    <a href="{{ url_for('gerenciar_matriculas') }}" class="btn btn-success btn-lg px-4">
+                        ðŸŽ“ Realizar MatrÃ­cula
+                    </a>
+                {% endif %}
+
+                <!-- OpÃ§Ãµes para PROFESSORES -->
+                {% if session['tipo'] == 'PROFESSOR' %}
+                    <a href="{{ url_for('add_compromisso') }}" class="btn btn-warning btn-lg px-4">
+                        âœï¸ Agendar Prova/Trabalho
+                    </a>
+                {% endif %}
+            </div>
         </div>
+    </div>
 
-        <button type="submit" class="btn btn-primary">Salvar</button>
-        <a href="{{ url_for('list_compromissos') }}" class="btn btn-secondary">Cancelar</a>
-    </form>
-
-    <script>
-        // Garante que apenas um dropdown (turma ou aluno) possa ser selecionado por vez
-        const turmaSelect = document.getElementById('turma_id');
-        const alunoSelect = document.getElementById('aluno_id');
-
-        turmaSelect.addEventListener('change', function() {
-            if (this.value !== '0') {
-                alunoSelect.value = '0';
-            }
-        });
-
-        alunoSelect.addEventListener('change', function() {
-            if (this.value !== '0') {
-                turmaSelect.value = '0';
-            }
-        });
-    </script>
+    <!-- OpÃ§Ãµes exclusivas para ADMIN -->
+    {% if session['tipo'] == 'ADMIN' %}
+    <div class="row align-items-md-stretch mt-4 g-3">
+        <div class="col-md-4">
+            <div class="h-100 p-4 text-white bg-dark rounded-3">
+                <h2>ðŸ‘¤ UsuÃ¡rios</h2>
+                <p>Gerencie alunos e professores cadastrados.</p>
+                <a href="{{ url_for('list_alunos') }}" class="btn btn-outline-light w-100 mb-2">Gerenciar Alunos</a>
+                <a href="{{ url_for('list_professores') }}" class="btn btn-outline-light w-100">Gerenciar Professores</a>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="h-100 p-4 bg-secondary text-white border rounded-3">
+                <h2>ðŸ“š Disciplinas</h2>
+                <p>Cadastre novas disciplinas e veja a grade.</p>
+                <a href="{{ url_for('list_disciplinas') }}" class="btn btn-outline-light w-100 mt-auto">Gerenciar Disciplinas</a>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="h-100 p-4 bg-warning bg-opacity-75 border rounded-3">
+                <h2>âš™ï¸ Config. Turmas</h2>
+                <p>Vincule Professores Ã s Disciplinas (AlocaÃ§Ã£o).</p>
+                <a href="{{ url_for('alocacao_professor') }}" class="btn btn-dark w-100 mt-auto">Gerenciar AlocaÃ§Ãµes</a>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
 {% endblock %}
 
 # C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\disciplinas.html
@@ -499,36 +1030,74 @@ db_config = {
 
 # C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\layout.html
 
-<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
-    <div class="container-fluid">
-        <a class="navbar-brand" href="/">Agenda Univ.</a>
-        <div class="collapse navbar-collapse">
-            <ul class="navbar-nav me-auto">
-                {% if session.usuario_id %}
-                    <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}">Home</a></li>
-                    <li class="nav-item"><a class="nav-link" href="{{ url_for('list_compromissos') }}">Minha Agenda</a></li>
-                    
-                    {% if session.tipo == 'ALUNO' %}
-                        <li class="nav-item"><a class="nav-link" href="{{ url_for('gerenciar_matriculas') }}">MatrÃ­cula</a></li>
+<!doctype html>
+<html lang="pt-br">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Agenda UniversitÃ¡ria</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+    <!-- Barra de NavegaÃ§Ã£o -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">Agenda Univ.</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <!-- Verifica se existe usuÃ¡rio na sessÃ£o para mostrar o menu -->
+                    {% if session.usuario_id %}
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}">Home</a></li>
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('list_compromissos') }}">Minha Agenda</a></li>
+                        
+                        {% if session.tipo == 'ALUNO' %}
+                            <li class="nav-item"><a class="nav-link" href="{{ url_for('gerenciar_matriculas') }}">MatrÃ­cula</a></li>
+                        {% endif %}
+                        
+                        {% if session.tipo == 'ADMIN' %}
+                            <li class="nav-item"><a class="nav-link" href="/alunos">Gerenciar UsuÃ¡rios</a></li>
+                            <li class="nav-item"><a class="nav-link" href="/disciplinas">Disciplinas</a></li>
+                        {% endif %}
                     {% endif %}
-                    
-                    {% if session.tipo == 'ADMIN' %}
-                        <li class="nav-item"><a class="nav-link" href="/alunos">Gerenciar UsuÃ¡rios</a></li>
-                        <li class="nav-item"><a class="nav-link" href="/disciplinas">Disciplinas</a></li>
+                </ul>
+                <ul class="navbar-nav">
+                    {% if session.usuario_id %}
+                        <li class="nav-item"><span class="nav-link text-light">OlÃ¡, {{ session.nome }} ({{ session.tipo }})</span></li>
+                        <li class="nav-item"><a class="btn btn-outline-light btn-sm ms-2" href="{{ url_for('logout') }}">Sair</a></li>
+                    {% else %}
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('login') }}">Login</a></li>
                     {% endif %}
-                {% endif %}
-            </ul>
-            <ul class="navbar-nav">
-                {% if session.usuario_id %}
-                    <li class="nav-item"><span class="nav-link text-light">OlÃ¡, {{ session.nome }} ({{ session.tipo }})</span></li>
-                    <li class="nav-item"><a class="btn btn-outline-light btn-sm ms-2" href="{{ url_for('logout') }}">Sair</a></li>
-                {% else %}
-                    <li class="nav-item"><a class="nav-link" href="{{ url_for('login') }}">Login</a></li>
-                {% endif %}
-            </ul>
+                </ul>
+            </div>
         </div>
+    </nav>
+
+    <!-- Container Principal -->
+    <div class="container mt-4">
+        <!-- Mensagens de Flash (Erros e Sucessos) -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        
+        <!-- AQUI Ã‰ ONDE O CONTEÃšDO DAS OUTRAS PÃGINAS Ã‰ INSERIDO -->
+        {% block content %}{% endblock %}
     </div>
-</nav>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
 
 # C:\Users\paulo\OneDrive\Área de Trabalho\Agenda_academica\templates\login.html
 

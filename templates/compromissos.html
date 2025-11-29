@@ -5,8 +5,21 @@
         <h2>Compromissos</h2>
         <a href="{{ url_for('add_compromisso') }}" class="btn btn-primary">Adicionar Compromisso</a>
     </div>
+    
     <div class="list-group">
         {% for c in compromissos %}
+        
+        <!-- Determinar se o usuário atual é o DONO deste compromisso -->
+        {% set is_owner = False %}
+        
+        {% if session['tipo'] == 'ADMIN' %}
+            {% set is_owner = True %}
+        {% elif session['tipo'] == 'ALUNO' and c.aluno_usuario_id == session['usuario_id'] %}
+            {% set is_owner = True %}
+        {% elif session['tipo'] == 'PROFESSOR' and c.turma_usuario_id == session['usuario_id'] %}
+            {% set is_owner = True %}
+        {% endif %}
+
         <div class="list-group-item list-group-item-action flex-column align-items-start">
             <div class="d-flex w-100 justify-content-between">
                 <h5 class="mb-1">{{ c.titulo }} 
@@ -26,20 +39,28 @@
             <div class="mt-2 p-2 bg-light border rounded">
                 <strong>Turma:</strong> {{ c.nome_disciplina }} <br>
                 <strong>Professor:</strong> {{ c.professor_nome }}
+                {% if not is_owner %}
+                    <br><small class="text-muted text-success">Este é um evento da turma (Somente leitura).</small>
+                {% endif %}
             </div>
-            {% elif c.aluno_nome %}
+            {% elif c.aluno_usuario_id %}
             <div class="mt-2 p-2 bg-light border rounded">
-                <strong>Para:</strong> Aluno {{ c.aluno_nome }}
+                <strong>Pessoal:</strong> Evento privado do aluno.
             </div>
             {% else %}
             <small class="text-muted">Compromisso Geral</small>
             {% endif %}
 
+            <!-- Botões de Ação: Só aparecem se for Dono ou Admin -->
+            {% if is_owner %}
             <div class="mt-2">
+                 <a href="{{ url_for('edit_compromisso', id=c.compromisso_id) }}" class="btn btn-sm btn-warning">Editar</a>
+                 
                  <form action="{{ url_for('delete_compromisso', id=c.compromisso_id) }}" method="post" style="display:inline;">
                     <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Tem certeza?');">Excluir</button>
                 </form>
             </div>
+            {% endif %}
         </div>
         {% else %}
         <p>Nenhum compromisso encontrado.</p>

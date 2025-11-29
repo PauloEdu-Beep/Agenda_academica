@@ -4,69 +4,83 @@
 <div class="container mt-4">
     <div class="card shadow">
         <div class="card-header bg-primary text-white">
-            <h4 class="mb-0">Agendar Compromisso</h4>
+            <h4 class="mb-0">
+                {% if action == 'edit' %}Editar Compromisso{% else %}Agendar Compromisso{% endif %}
+            </h4>
         </div>
         <div class="card-body">
-            <form method="post" id="formCompromisso">
+            <form method="post">
                 
-                <!-- 1. Título e Data (Comum a todos) -->
+                <!-- 1. Título e Data -->
                 <div class="row mb-3">
                     <div class="col-md-8">
                         <label class="form-label">Título</label>
-                        <input type="text" name="titulo" class="form-control" required placeholder="Ex: Prova 1, Entrega de Lista...">
+                        <input type="text" name="titulo" class="form-control" required 
+                               value="{{ compromisso.titulo if compromisso else '' }}"
+                               placeholder="Ex: Prova 1, Entrega de Lista...">
                     </div>
                     <div class="col-md-4">
                         <label class="form-label">Data e Hora Início</label>
-                        <input type="datetime-local" name="data_hora_inicio" class="form-control" required>
+                        <input type="datetime-local" name="data_hora_inicio" class="form-control" required
+                               value="{{ compromisso.data_hora_inicio.strftime('%Y-%m-%dT%H:%M') if compromisso else '' }}">
                     </div>
                 </div>
 
-                <!-- 2. Tipo de Compromisso (Dropdown Condicional) -->
+                <!-- 2. Tipo de Compromisso -->
+                <!-- Na edição, geralmente não se muda o tipo para não quebrar lógica, mas aqui permitiremos -->
                 <div class="mb-3">
                     <label class="form-label">Tipo de Evento</label>
-                    <select class="form-select" name="tipo_compromisso" id="selectTipo" required>
+                    <select class="form-select" name="tipo_compromisso" required>
                         {% if session['tipo'] == 'PROFESSOR' %}
-                            <option value="PROVA">📚 Prova (Avaliação)</option>
-                            <option value="TAREFA">📝 Trabalho / Entrega</option>
-                            <option value="REUNIAO">📢 Aviso Importante</option>
+                            <option value="PROVA" {% if compromisso and compromisso.tipo_compromisso == 'PROVA' %}selected{% endif %}>📚 Prova (Avaliação)</option>
+                            <option value="TAREFA" {% if compromisso and compromisso.tipo_compromisso == 'TAREFA' %}selected{% endif %}>📄 Trabalho / Entrega</option>
+                            <option value="REUNIAO" {% if compromisso and compromisso.tipo_compromisso == 'REUNIAO' %}selected{% endif %}>📢 Aviso Importante</option>
                         {% else %}
-                            <option value="TAREFA">📌 Estudo Pessoal</option>
-                            <option value="OUTRO">🎈 Lembrete Pessoal</option>
+                            <option value="TAREFA" {% if compromisso and compromisso.tipo_compromisso == 'TAREFA' %}selected{% endif %}>📌 Estudo Pessoal</option>
+                            <option value="OUTRO" {% if compromisso and compromisso.tipo_compromisso == 'OUTRO' %}selected{% endif %}>🎈 Lembrete Pessoal</option>
                         {% endif %}
                     </select>
                 </div>
 
-                <!-- 3. Seleção de Turma (Apenas para Professores) -->
+                <!-- 3. Seleção de Turma (Apenas para Professores e apenas na CRIAÇÃO) -->
                 {% if session['tipo'] == 'PROFESSOR' %}
-                <div class="mb-3 p-3 bg-light border rounded" id="divTurma">
-                    <label class="form-label fw-bold text-primary">Vincular à Disciplina:</label>
-                    <p class="small text-muted mb-1">Este evento aparecerá para todos os alunos matriculados nesta matéria.</p>
-                    
-                    {% if turmas %}
-                        <select class="form-select" name="turma_id" required>
-                            <option value="" disabled selected>Selecione a matéria...</option>
-                            {% for t in turmas %}
-                                <option value="{{ t.usuario_id }}-{{ t.disciplina_id }}">{{ t.nome_disciplina }}</option>
-                            {% endfor %}
-                        </select>
+                    {% if action == 'add' %}
+                    <div class="mb-3 p-3 bg-light border rounded">
+                        <label class="form-label fw-bold text-primary">Vincular à Disciplina:</label>
+                        <p class="small text-muted mb-1">Este evento aparecerá para todos os alunos matriculados nesta matéria.</p>
+                        
+                        {% if turmas %}
+                            <select class="form-select" name="turma_id" required>
+                                <option value="" disabled selected>Selecione a matéria...</option>
+                                {% for t in turmas %}
+                                    <option value="{{ t.usuario_id }}-{{ t.disciplina_id }}">{{ t.nome_disciplina }}</option>
+                                {% endfor %}
+                            </select>
+                        {% else %}
+                            <div class="alert alert-warning">
+                                <i class="bi bi-exclamation-triangle"></i>
+                                Você não está vinculado a nenhuma disciplina.
+                            </div>
+                        {% endif %}
+                    </div>
                     {% else %}
-                        <div class="alert alert-warning">
-                            <i class="bi bi-exclamation-triangle"></i>
-                            Você não está vinculado a nenhuma disciplina. 
-                            <br>Entre em contato com a administração para realizar sua alocação.
-                        </div>
+                    <!-- Na edição, mostramos apenas informativo, sem opção de troca -->
+                    <div class="alert alert-info">
+                        Editando evento de disciplina. Para trocar a turma, exclua e crie novamente.
+                    </div>
                     {% endif %}
-                </div>
                 {% endif %}
 
                 <div class="mb-3">
                     <label class="form-label">Detalhes Adicionais</label>
-                    <textarea name="descricao" class="form-control" rows="3"></textarea>
+                    <textarea name="descricao" class="form-control" rows="3">{{ compromisso.descricao if compromisso else '' }}</textarea>
                 </div>
 
                 <div class="d-flex justify-content-end gap-2">
                     <a href="{{ url_for('list_compromissos') }}" class="btn btn-secondary">Cancelar</a>
-                    <button type="submit" class="btn btn-success">Salvar Agenda</button>
+                    <button type="submit" class="btn btn-success">
+                        {% if action == 'edit' %}Atualizar{% else %}Salvar Agenda{% endif %}
+                    </button>
                 </div>
             </form>
         </div>

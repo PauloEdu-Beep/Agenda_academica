@@ -3,9 +3,14 @@ from flask import Flask, render_template, request, redirect, url_for, flash, ses
 import pymysql.cursors
 from functools import wraps
 from db_config import db_config
+# --- SEGURANÇA: Importação para criar e verificar Hashes de senha ---
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 app.secret_key = 'chave_super_secreta_para_sessao'
+
+# Configuração Global
+SEMESTRE_ATUAL = "2024.1"
 
 # --- Conexão com o Banco de Dados ---
 def get_db_connection():
@@ -44,7 +49,7 @@ def admin_required(f):
 def login():
     if request.method == 'POST':
         email = request.form['email']
-        senha = request.form['senha']
+        senha_digitada = request.form['senha']
         
         conn = get_db_connection()
         if not conn:
@@ -52,13 +57,16 @@ def login():
             return render_template('login.html')
             
         cursor = conn.cursor()
-        # Nota: Em produção, utilize hash de senha (bcrypt)
-        cursor.execute("SELECT * FROM Usuario WHERE email = %s AND senha_hash = %s", (email, senha))
+        
+        # --- SEGURANÇA: Busca usuário APENAS pelo e-mail ---
+        cursor.execute("SELECT * FROM Usuario WHERE email = %s", (email,))
         user = cursor.fetchone()
+        
         cursor.close()
         conn.close()
 
-        if user:
+        # --- SEGURANÇA: Verifica se a senha bate com o Hash ---
+        if user and check_password_hash(user['senha_hash'], senha_digitada):
             session['usuario_id'] = user['usuario_id']
             session['nome'] = user['nome_completo']
             session['tipo'] = user['tipo_usuario']
@@ -97,23 +105,24 @@ def gerenciar_matriculas():
 
     if request.method == 'POST':
         disciplina_id = request.form['disciplina_id']
-        semestre = "2024.1" 
         
         try:
             cursor.execute("INSERT INTO Matricula (usuario_id, disciplina_id, semestre) VALUES (%s, %s, %s)",
-                           (session['usuario_id'], disciplina_id, semestre))
+                           (session['usuario_id'], disciplina_id, SEMESTRE_ATUAL))
             conn.commit()
-            flash('Matrícula realizada com sucesso! Agora você verá a agenda desta matéria.', 'success')
+            flash('Matrícula realizada com sucesso!', 'success')
         except pymysql.MySQLError as e:
             conn.rollback()
             flash(f'Erro na matrícula (você já está matriculado?): {e}', 'danger')
 
-    # Lista disciplinas e marca se o aluno já tem matrícula
     cursor.execute("""
         SELECT d.*, 
-            (SELECT COUNT(*) FROM Matricula m WHERE m.disciplina_id = d.disciplina_id AND m.usuario_id = %s) as matriculado
+            (SELECT COUNT(*) FROM Matricula m 
+             WHERE m.disciplina_id = d.disciplina_id 
+             AND m.usuario_id = %s 
+             AND m.semestre = %s) as matriculado
         FROM Disciplina d
-    """, (session['usuario_id'],))
+    """, (session['usuario_id'], SEMESTRE_ATUAL))
     disciplinas = cursor.fetchall()
     
     cursor.close()
@@ -131,25 +140,26 @@ def list_compromissos():
     uid = session['usuario_id']
     tipo = session['tipo']
 
-    # Lógica de Visualização baseada no Papel
     if tipo == 'ALUNO':
-        # Aluno vê: Seus Pessoais + Eventos das Turmas onde tem Matrícula
         query = """
-            SELECT c.*, d.nome_disciplina, u_prof.nome_completo as autor_nome
+            SELECT c.*, d.nome_disciplina, u_prof.nome_completo as professor_nome,
+                   u_prof.usuario_id as prof_id_dono
             FROM Compromisso c
             LEFT JOIN Disciplina d ON c.turma_disciplina_id = d.disciplina_id
             LEFT JOIN Usuario u_prof ON c.turma_usuario_id = u_prof.usuario_id
-            LEFT JOIN Matricula m ON m.disciplina_id = c.turma_disciplina_id AND m.usuario_id = %s
+            LEFT JOIN Matricula m ON m.disciplina_id = c.turma_disciplina_id 
+                                  AND m.usuario_id = %s 
+                                  AND m.semestre = %s
             WHERE c.aluno_usuario_id = %s 
                OR (c.turma_usuario_id IS NOT NULL AND m.usuario_id IS NOT NULL)
             ORDER BY c.data_hora_inicio ASC
         """
-        cursor.execute(query, (uid, uid))
+        cursor.execute(query, (uid, SEMESTRE_ATUAL, uid))
         
     elif tipo == 'PROFESSOR':
-        # Professor vê: Apenas o que ele criou para suas turmas
         query = """
-            SELECT c.*, d.nome_disciplina, 'Você' as autor_nome
+            SELECT c.*, d.nome_disciplina, 'Você' as professor_nome,
+                   c.turma_usuario_id as prof_id_dono
             FROM Compromisso c
             JOIN Disciplina d ON c.turma_disciplina_id = d.disciplina_id
             WHERE c.turma_usuario_id = %s
@@ -158,9 +168,8 @@ def list_compromissos():
         cursor.execute(query, (uid,))
         
     else: # ADMIN
-        # Admin vê tudo
         query = """
-            SELECT c.*, d.nome_disciplina, u.nome_completo as autor_nome
+            SELECT c.*, d.nome_disciplina, u.nome_completo as professor_nome
             FROM Compromisso c
             LEFT JOIN Disciplina d ON c.turma_disciplina_id = d.disciplina_id
             LEFT JOIN Usuario u ON c.turma_usuario_id = u.usuario_id
@@ -189,34 +198,28 @@ def add_compromisso():
         fim = request.form.get('data_hora_fim') or None
         tipo_comp = request.form['tipo_compromisso']
         
-        # Variáveis de escopo
         aluno_id = None
         turma_prof_id = None
         turma_disc_id = None
 
         if tipo_usuario == 'ALUNO':
-            # Aluno só cria compromisso pessoal
             aluno_id = session['usuario_id']
-            # Segurança: Forçar tipo para evitar que aluno crie "PROVA" fake
             if tipo_comp not in ['TAREFA', 'OUTRO']: 
                 tipo_comp = 'OUTRO'
 
         elif tipo_usuario == 'PROFESSOR':
-            # Professor deve selecionar a turma
-            turma_str = request.form.get('turma_id') # Formato "IDPROF-IDDISC"
-            
+            turma_str = request.form.get('turma_id')
             if not turma_str:
-                flash('Erro: Professores devem selecionar uma turma.', 'danger')
+                flash('Erro: Selecione uma turma.', 'danger')
                 return redirect(url_for('add_compromisso'))
             
             p_id, d_id = turma_str.split('-')
             
-            # Segurança: Verificar se o professor realmente é dono dessa turma
             cursor.execute("SELECT * FROM Professor_Disciplina WHERE usuario_id=%s AND disciplina_id=%s", (p_id, d_id))
             alocacao = cursor.fetchone()
             
             if not alocacao or int(p_id) != session['usuario_id']:
-                flash('Acesso negado: Você não leciona esta disciplina.', 'danger')
+                flash('Acesso negado: Disciplina inválida.', 'danger')
                 return redirect(url_for('add_compromisso'))
             
             turma_prof_id = p_id
@@ -238,7 +241,6 @@ def add_compromisso():
         conn.close()
         return redirect(url_for('list_compromissos'))
 
-    # GET: Carregar turmas se for professor
     turmas_professor = []
     if tipo_usuario == 'PROFESSOR':
         cursor.execute("""
@@ -251,7 +253,60 @@ def add_compromisso():
 
     cursor.close()
     conn.close()
-    return render_template('compromisso_form.html', turmas=turmas_professor)
+    return render_template('compromisso_form.html', turmas=turmas_professor, action='add', compromisso=None)
+
+@app.route('/compromissos/edit/<int:id>', methods=['GET', 'POST'])
+@login_required
+def edit_compromisso(id):
+    conn = get_db_connection()
+    if not conn: return redirect(url_for('list_compromissos'))
+    cursor = conn.cursor()
+    
+    uid = session['usuario_id']
+    tipo = session['tipo']
+    
+    query_base = "SELECT * FROM Compromisso WHERE compromisso_id = %s"
+    params = [id]
+    
+    if tipo == 'ALUNO':
+        query_base += " AND aluno_usuario_id = %s"
+        params.append(uid)
+    elif tipo == 'PROFESSOR':
+        query_base += " AND turma_usuario_id = %s"
+        params.append(uid)
+
+    cursor.execute(query_base, tuple(params))
+    compromisso = cursor.fetchone()
+
+    if not compromisso:
+        flash("Compromisso não encontrado ou você não tem permissão para editá-lo.", "danger")
+        cursor.close()
+        conn.close()
+        return redirect(url_for('list_compromissos'))
+
+    if request.method == 'POST':
+        titulo = request.form['titulo']
+        descricao = request.form['descricao']
+        inicio = request.form['data_hora_inicio']
+        
+        try:
+            cursor.execute("""
+                UPDATE Compromisso 
+                SET titulo=%s, descricao=%s, data_hora_inicio=%s
+                WHERE compromisso_id=%s
+            """, (titulo, descricao, inicio, id))
+            conn.commit()
+            flash('Compromisso atualizado!', 'success')
+            return redirect(url_for('list_compromissos'))
+        except pymysql.MySQLError as err:
+            conn.rollback()
+            flash(f'Erro ao atualizar: {err}', 'danger')
+
+    turmas_professor = [] 
+    
+    cursor.close()
+    conn.close()
+    return render_template('compromisso_form.html', action='edit', compromisso=compromisso, turmas=turmas_professor)
 
 @app.route('/compromissos/delete/<int:id>', methods=['POST'])
 @login_required
@@ -260,16 +315,19 @@ def delete_compromisso(id):
     if not conn: return redirect(url_for('list_compromissos'))
     cursor = conn.cursor()
     try:
-        # Segurança: Só deleta se for o dono do registro
         if session['tipo'] == 'ALUNO':
             cursor.execute("DELETE FROM Compromisso WHERE compromisso_id = %s AND aluno_usuario_id = %s", (id, session['usuario_id']))
         elif session['tipo'] == 'PROFESSOR':
              cursor.execute("DELETE FROM Compromisso WHERE compromisso_id = %s AND turma_usuario_id = %s", (id, session['usuario_id']))
-        else: # Admin pode tudo
+        else:
             cursor.execute("DELETE FROM Compromisso WHERE compromisso_id = %s", (id,))
-            
-        conn.commit()
-        flash('Compromisso removido.', 'success')
+        
+        if cursor.rowcount == 0:
+             flash('Ação negada ou item não encontrado.', 'warning')
+        else:
+             conn.commit()
+             flash('Compromisso removido.', 'success')
+             
     except pymysql.MySQLError as err:
         flash(f'Erro ao remover: {err}', 'danger')
     finally:
@@ -278,10 +336,9 @@ def delete_compromisso(id):
     return redirect(url_for('list_compromissos'))
 
 # ==============================================================================
-#      ÁREA DO ADMINISTRADOR (CONFIGURAÇÃO E CRUDs)
+#      ÁREA DO ADMINISTRADOR
 # ==============================================================================
 
-# --- Nova Funcionalidade: Alocação (Liga Professor à Disciplina) ---
 @app.route('/admin/alocacao', methods=['GET', 'POST'])
 @login_required
 @admin_required
@@ -293,32 +350,30 @@ def alocacao_professor():
     if request.method == 'POST':
         prof_id = request.form['professor_id']
         disc_id = request.form['disciplina_id']
-        semestre = "2024.1" 
         
         try:
             cursor.execute("INSERT INTO Professor_Disciplina (usuario_id, disciplina_id, semestre) VALUES (%s, %s, %s)",
-                           (prof_id, disc_id, semestre))
+                           (prof_id, disc_id, SEMESTRE_ATUAL))
             conn.commit()
-            flash('Professor vinculado à disciplina com sucesso!', 'success')
+            flash('Vínculo criado com sucesso!', 'success')
         except pymysql.MySQLError as e:
             conn.rollback()
-            flash(f'Erro ao vincular (talvez já exista?): {e}', 'danger')
+            flash(f'Erro: {e}', 'danger')
 
-    # Buscar dados para popular os selects
     cursor.execute("SELECT u.usuario_id, u.nome_completo FROM Usuario u WHERE u.tipo_usuario = 'PROFESSOR'")
     professores = cursor.fetchall()
     
     cursor.execute("SELECT * FROM Disciplina ORDER BY nome_disciplina")
     disciplinas = cursor.fetchall()
     
-    # Listar alocações existentes para visualização
     cursor.execute("""
         SELECT pd.*, u.nome_completo, d.nome_disciplina 
         FROM Professor_Disciplina pd
         JOIN Usuario u ON pd.usuario_id = u.usuario_id
         JOIN Disciplina d ON pd.disciplina_id = d.disciplina_id
+        WHERE pd.semestre = %s
         ORDER BY d.nome_disciplina
-    """)
+    """, (SEMESTRE_ATUAL,))
     alocacoes = cursor.fetchall()
     
     cursor.close()
@@ -333,14 +388,12 @@ def list_alunos():
     conn = get_db_connection()
     if not conn: return redirect(url_for('dashboard'))
     cursor = conn.cursor()
-    query = """
+    cursor.execute("""
         SELECT u.usuario_id, u.nome_completo, u.email, a.matricula
         FROM Usuario u
         JOIN Aluno a ON u.usuario_id = a.usuario_id
-        WHERE u.tipo_usuario = 'ALUNO'
-        ORDER BY u.nome_completo
-    """
-    cursor.execute(query)
+        WHERE u.tipo_usuario = 'ALUNO' ORDER BY u.nome_completo
+    """)
     alunos = cursor.fetchall()
     cursor.close()
     conn.close()
@@ -354,7 +407,9 @@ def add_aluno():
         nome = request.form['nome_completo']
         email = request.form['email']
         matricula = request.form['matricula']
-        senha_hash = "123456" 
+        
+        # --- SEGURANÇA: GERA HASH DA SENHA PADRÃO ---
+        senha_hash = generate_password_hash("123456") 
 
         conn = get_db_connection()
         if not conn: return redirect(url_for('list_alunos'))
@@ -431,14 +486,12 @@ def list_professores():
     conn = get_db_connection()
     if not conn: return redirect(url_for('dashboard'))
     cursor = conn.cursor()
-    query = """
+    cursor.execute("""
         SELECT u.usuario_id, u.nome_completo, u.email, p.departamento
         FROM Usuario u
         JOIN Professor p ON u.usuario_id = p.usuario_id
-        WHERE u.tipo_usuario = 'PROFESSOR'
-        ORDER BY u.nome_completo
-    """
-    cursor.execute(query)
+        WHERE u.tipo_usuario = 'PROFESSOR' ORDER BY u.nome_completo
+    """)
     professores = cursor.fetchall()
     cursor.close()
     conn.close()
@@ -452,7 +505,9 @@ def add_professor():
         nome = request.form['nome_completo']
         email = request.form['email']
         departamento = request.form['departamento']
-        senha_hash = "123456"
+        
+        # --- SEGURANÇA: GERA HASH DA SENHA PADRÃO ---
+        senha_hash = generate_password_hash("123456")
 
         conn = get_db_connection()
         if not conn: return redirect(url_for('list_professores'))

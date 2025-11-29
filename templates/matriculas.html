@@ -1,18 +1,22 @@
 {% extends 'layout.html' %}
 {% block content %}
-<h2>Matrícula em Disciplinas</h2>
+<h2>Matrícula em Disciplinas (Semestre Atual)</h2>
 <p class="text-muted">Selecione as disciplinas que você está cursando este semestre para ver as datas de provas e trabalhos na sua agenda.</p>
 
 <div class="row">
     {% for d in disciplinas %}
     <div class="col-md-4 mb-3">
-        <div class="card h-100 {% if d.matriculado %}border-success{% endif %}">
+        <div class="card h-100 {% if d.matriculado %}border-success bg-light{% endif %}">
             <div class="card-body">
                 <h5 class="card-title">{{ d.nome_disciplina }}</h5>
                 <h6 class="card-subtitle mb-2 text-muted">{{ d.codigo_disciplina }}</h6>
+                <p class="card-text text-muted">Carga: {{ d.carga_horaria or 'N/A' }}h</p>
                 
                 {% if d.matriculado %}
-                    <button class="btn btn-success disabled w-100">Matriculado ✅</button>
+                    <!-- Botão Desativado se já for matriculado -->
+                    <button class="btn btn-success disabled w-100">
+                        <i class="bi bi-check-circle"></i> Já Matriculado
+                    </button>
                 {% else %}
                     <form method="post">
                         <input type="hidden" name="disciplina_id" value="{{ d.disciplina_id }}">
